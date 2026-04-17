@@ -9,6 +9,7 @@ import { createAtmosphere } from './scene/Atmosphere';
 import { createCamera } from './scene/Camera';
 import { createSkybox } from './scene/Skybox';
 import { GlobeLighting } from './scene/GlobeLighting';
+import { CloudShadow } from './scene/CloudShadow';
 import { WeatherManager } from './weather/WeatherManager';
 import { WeatherOverlay } from './weather/WeatherOverlay';
 import { CloudRenderer } from './clouds/CloudRenderer';
@@ -51,6 +52,9 @@ async function init() {
 
   // Weather data manager
   const weather = new WeatherManager();
+
+  // Cloud shadows on globe surface
+  const cloudShadow = new CloudShadow(scene, globe, weather);
 
   // Volumetric clouds (half-res render + upscale)
   const clouds = new CloudRenderer(scene, weather);
@@ -144,6 +148,9 @@ async function init() {
     const hourOfDay = (Date.now() / 3600000) % 24;
     globeLighting.updateTime(hourOfDay);
     globeLighting.updateCameraPosition(camera.threeCamera.position);
+
+    // Update cloud shadows
+    cloudShadow.update(dt, globeLighting.getSunDirection());
 
     renderer.render(scene, camera.threeCamera);
   }

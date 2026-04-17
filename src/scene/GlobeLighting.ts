@@ -137,4 +137,11 @@ export class GlobeLighting {
     mat.uniforms.uCameraPosition.value.copy(pos);
     mat.uniforms.uSunDirection.value.copy(this.sunLight.position).normalize();
   }
+
+  /**
+   * Get the current sun direction vector.
+   */
+  getSunDirection(): THREE.Vector3 {
+    return this.sunLight.position.clone().normalize();
+  }
 }
