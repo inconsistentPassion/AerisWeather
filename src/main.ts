@@ -69,6 +69,43 @@ async function init() {
     onCameraMode: (mode) => camera.setMode(mode),
   });
 
+  // --- Globe auto-rotation ---
+  let autoRotate = true;
+  const ROTATION_SPEED = 0.00003; // radians per ms (~slow spin)
+
+  // --- Keyboard shortcuts ---
+  window.addEventListener('keydown', (e) => {
+    switch (e.code) {
+      case 'Space':
+        e.preventDefault();
+        autoRotate = !autoRotate;
+        break;
+      case 'KeyR':
+        // Reset camera to default orbit
+        camera.setMode('orbit');
+        break;
+      case 'Digit1':
+        weather.toggleLayer('wind', !weather.isLayerActive('wind'));
+        break;
+      case 'Digit2':
+        weather.toggleLayer('clouds', !weather.isLayerActive('clouds'));
+        break;
+      case 'Digit3':
+        weather.toggleLayer('temperature', !weather.isLayerActive('temperature'));
+        break;
+      case 'Digit4':
+        weather.toggleLayer('pressure', !weather.isLayerActive('pressure'));
+        break;
+      case 'Digit5':
+        weather.toggleLayer('humidity', !weather.isLayerActive('humidity'));
+        break;
+    }
+  });
+
+  // Stop auto-rotate when user interacts
+  container.addEventListener('mousedown', () => { autoRotate = false; });
+  container.addEventListener('wheel', () => { autoRotate = false; });
+
   // Render loop
   let lastTime = performance.now();
   let frameCount = 0;
@@ -79,6 +116,13 @@ async function init() {
     const dt = Math.min((now - lastTime) / 1000, 0.1); // cap dt
     lastTime = now;
     frameCount++;
+
+    // Globe auto-rotation
+    if (autoRotate) {
+      globe.rotation.y += ROTATION_SPEED * (now - lastTime + dt * 1000);
+      // Rotate atmosphere and clouds with globe
+      atmosphereGroup.rotation.y = globe.rotation.y;
+    }
 
     camera.update(dt);
     weather.update(dt);
