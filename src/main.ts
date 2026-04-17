@@ -2,14 +2,16 @@
  * AerisWeather — Main Entry Point
  * "Windy meets MSFS, but in the browser."
  *
- * MapLibre GL JS handles everything: globe, tiles, zoom, camera, atmosphere.
- * Volumetric clouds will be re-added as a custom layer once the base globe works.
+ * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
+ * Custom layers   → volumetric clouds (Three.js), wind arrows (GeoJSON)
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
+import { addWindLayer, setWindLayerVisible } from './weather/WindLayer';
+import { createCloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -17,7 +19,6 @@ async function init() {
   const container = document.getElementById('app')!;
   const uiContainer = document.getElementById('ui-overlay')!;
 
-  // Ensure container has dimensions
   container.style.width = '100%';
   container.style.height = '100%';
 
@@ -36,7 +37,7 @@ async function init() {
     renderWorldCopies: false,
   });
 
-  // Apply globe projection on style load
+  // Globe projection
   map.on('style.load', () => {
     try {
       (map as any).setProjection({ type: 'globe' });
@@ -47,11 +48,24 @@ async function init() {
 
   map.on('error', (e) => console.error('MapLibre error:', e));
 
-  // ── Wait for load ──────────────────────────────────────────────────
+  // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
+
+  // ── Add weather layers ─────────────────────────────────────────────
+  // Wind arrows (MapLibre native GeoJSON layer)
+  addWindLayer(map, weather);
+  // Start visible
+  setWindLayerVisible(map, true);
+
+  // Volumetric clouds (Three.js custom layer)
+  const cloudLayer = createCloudLayer(weather);
+  map.addLayer(cloudLayer);
 
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
+  // Trigger wind arrow render after data loads
+  const { updateWindArrows } = await import('./weather/WindLayer');
+  updateWindArrows(map, weather);
 
   // ── UI ─────────────────────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -59,6 +73,18 @@ async function init() {
     onLevelChange: (l) => weather.setLevel(l),
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
+
+      switch (layer) {
+        case 'wind':
+          setWindLayerVisible(map, active);
+          break;
+        case 'clouds':
+          try {
+            map.setLayoutProperty('volumetric-clouds', 'visibility',
+              active ? 'visible' : 'none');
+          } catch { /* not yet added */ }
+          break;
+      }
     },
     onCameraMode: (mode) => {
       if (mode === 'orbit') {
