@@ -268,5 +268,25 @@ export function createGlobe(): THREE.Mesh {
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'globe';
+
+  // Load CARTO dark tiles asynchronously and swap when ready
+  loadTileTexture(mesh);
+
   return mesh;
+}
+
+/**
+ * Load CARTO Dark Matter tiles onto the globe, replacing procedural texture.
+ */
+async function loadTileTexture(mesh: THREE.Mesh): Promise<void> {
+  try {
+    const { buildGlobeTextureFromTiles } = await import('./TileTexture');
+    const tileTexture = await buildGlobeTextureFromTiles(4);
+    const mat = mesh.material as THREE.MeshStandardMaterial;
+    mat.map = tileTexture;
+    mat.needsUpdate = true;
+  } catch (e) {
+    // Tiles failed to load — keep procedural fallback
+    console.warn('Tile texture load failed, using procedural fallback:', e);
+  }
 }
