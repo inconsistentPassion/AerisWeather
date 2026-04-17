@@ -1,21 +1,20 @@
 /**
  * WindParticleLayer — Windy-style animated streaks on the MapLibre globe.
  *
- * Performance-optimised:
- *  - Viewport culling via map.getBounds()
- *  - Hard cap: max 1000 particles projected + drawn per frame
- *  - Priority: fastest visible particles rendered first
- *  - No project() calls for off-screen or calm particles
+ * Fixes:
+ *  - Antimeridian-aware viewport culling
+ *  - Bilinear interpolated grid sampling (wraps at date line)
+ *  - Viewport-culled: max 1000 particles projected + drawn per frame
  */
 
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
-const TOTAL_PARTICLES = 3000;  // kept in reserve
-const MAX_DRAWN = 1000;        // hard cap on rendered per frame
+const TOTAL_PARTICLES = 3000;
+const MAX_DRAWN = 1000;
 const TRAIL_LEN = 8;
 const MAX_AGE = 180;
-const STEP_DEG = 0.0012;       // degrees per m/s per frame
+const STEP_DEG = 0.0012;
 
 export class WindParticleLayer {
   private map: maplibregl.Map;
@@ -25,7 +24,6 @@ export class WindParticleLayer {
   private animId: number | null = null;
   private resizeObs: ResizeObserver;
 
-  // particle state
   private lon   = new Float64Array(TOTAL_PARTICLES);
   private lat   = new Float64Array(TOTAL_PARTICLES);
   private age   = new Float64Array(TOTAL_PARTICLES);
@@ -33,8 +31,6 @@ export class WindParticleLayer {
   private trailLon  = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailLat  = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailHead = new Uint16Array(TOTAL_PARTICLES);
-
-  // reusable index list for culling
   private visibleIdx = new Uint16Array(MAX_DRAWN);
 
   constructor(map: maplibregl.Map, weather: WeatherManager) {
@@ -60,21 +56,18 @@ export class WindParticleLayer {
     this.start();
   }
 
-  /* ── sizing ─────────────────────────────────────────────────── */
-
   private resize(): void {
     const r = this.map.getContainer().getBoundingClientRect();
-    const dpr = devicePixelRatio;
-    this.canvas.width = r.width * dpr;
-    this.canvas.height = r.height * dpr;
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const d = devicePixelRatio;
+    this.canvas.width = r.width * d;
+    this.canvas.height = r.height * d;
+    this.ctx.setTransform(d, 0, 0, d, 0, 0);
   }
 
   private clear(): void {
-    this.ctx.clearRect(0, 0, this.canvas.width / devicePixelRatio, this.canvas.height / devicePixelRatio);
+    const d = devicePixelRatio;
+    this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
   }
-
-  /* ── spawn ──────────────────────────────────────────────────── */
 
   private spawn(i: number): void {
     this.lon[i] = (Math.random() - 0.5) * 360;
@@ -88,8 +81,6 @@ export class WindParticleLayer {
       this.trailLat[b + t] = this.lat[i];
     }
   }
-
-  /* ── lifecycle ──────────────────────────────────────────────── */
 
   start(): void {
     if (this.animId !== null) return;
@@ -112,6 +103,37 @@ export class WindParticleLayer {
     this.canvas.remove();
   }
 
+  /* ── bilinear wind sample (date-line safe) ──────────────────── */
+
+  private sampleWind(
+    u: Float32Array, v: Float32Array,
+    lon: number, lat: number,
+    gw: number, gh: number,
+  ): { u: number; v: number; speed: number } {
+    // normalise lon to [0, 360) for grid indexing
+    let normLon = ((lon + 180) % 360 + 360) % 360;
+    const x = (normLon / 360) * gw;        // continuous grid x
+    const y = ((90 - lat) / 180) * gh;     // continuous grid y
+
+    const x0 = Math.floor(x) % gw;
+    const y0 = Math.max(0, Math.min(gh - 2, Math.floor(y)));
+    const x1 = (x0 + 1) % gw;             // wraps at date line
+    const y1 = y0 + 1;
+
+    const fx = x - Math.floor(x);
+    const fy = y - Math.floor(y);
+
+    const idx00 = y0 * gw + x0;
+    const idx01 = y0 * gw + x1;
+    const idx10 = y1 * gw + x0;
+    const idx11 = y1 * gw + x1;
+
+    const uVal = bilerp(u[idx00], u[idx01], u[idx10], u[idx11], fx, fy);
+    const vVal = bilerp(v[idx00], v[idx01], v[idx10], v[idx11], fx, fy);
+
+    return { u: uVal, v: vVal, speed: Math.sqrt(uVal * uVal + vVal * vVal) };
+  }
+
   /* ── frame ──────────────────────────────────────────────────── */
 
   private frame(): void {
@@ -125,19 +147,21 @@ export class WindParticleLayer {
     const gw = 360, gh = 180;
 
     /* fade */
-    const cw = this.canvas.width / devicePixelRatio;
-    const ch = this.canvas.height / devicePixelRatio;
+    const dpr = devicePixelRatio;
+    const cw = this.canvas.width / dpr;
+    const ch = this.canvas.height / dpr;
     this.ctx.globalCompositeOperation = 'destination-in';
     this.ctx.fillStyle = 'rgba(0,0,0,0.90)';
     this.ctx.fillRect(0, 0, cw, ch);
     this.ctx.globalCompositeOperation = 'source-over';
 
-    /* viewport bounds for culling */
+    /* viewport bounds — handle antimeridian */
     const bounds = this.map.getBounds();
     const vpW = bounds.getWest();
     const vpE = bounds.getEast();
     const vpS = bounds.getSouth();
     const vpN = bounds.getNorth();
+    const crossesDateLine = vpW > vpE;
 
     /* ── advect + collect visible ─────────────────────────────── */
     let visCount = 0;
@@ -152,19 +176,15 @@ export class WindParticleLayer {
         continue;
       }
 
-      /* grid sample */
-      const gi = Math.min(gw - 1, Math.max(0, Math.floor(((this.lon[i] + 180) / 360) * gw)));
-      const gj = Math.min(gh - 1, Math.max(0, Math.floor(((90 - this.lat[i]) / 180) * gh)));
-      const idx = gj * gw + gi;
-      const wu = u[idx] || 0, wv = v[idx] || 0;
-      const spd = Math.sqrt(wu * wu + wv * wv);
-      this.spd[i] = spd;
+      /* interpolated wind sample */
+      const wind = this.sampleWind(u, v, this.lon[i], this.lat[i], gw, gh);
+      this.spd[i] = wind.speed;
 
-      /* advect (cheap — no projection) */
-      if (spd >= 0.3) {
+      /* advect */
+      if (wind.speed >= 0.3) {
         const cosLat = Math.max(0.3, Math.cos(this.lat[i] * Math.PI / 180));
-        this.lon[i] += wu * spd * STEP_DEG / cosLat;
-        this.lat[i] += wv * spd * STEP_DEG;
+        this.lon[i] += wind.u * wind.speed * STEP_DEG / cosLat;
+        this.lat[i] += wind.v * wind.speed * STEP_DEG;
         if (this.lon[i] > 180) this.lon[i] -= 360;
         if (this.lon[i] < -180) this.lon[i] += 360;
         this.lat[i] = Math.max(-85, Math.min(85, this.lat[i]));
@@ -177,28 +197,42 @@ export class WindParticleLayer {
       this.trailLat[b + h] = this.lat[i];
       this.trailHead[i] = (h + 1) % TRAIL_LEN;
 
-      /* viewport cull */
-      if (spd < 0.3) continue;
-      if (this.lon[i] < vpW - 2 || this.lon[i] > vpE + 2) continue;
+      /* viewport cull (antimeridian safe) */
+      if (wind.speed < 0.3) continue;
+
+      let inView: boolean;
+      if (crossesDateLine) {
+        // viewport spans date line: visible = lon >= west OR lon <= east
+        inView = (this.lon[i] >= vpW - 2) || (this.lon[i] <= vpE + 2);
+      } else {
+        inView = this.lon[i] >= vpW - 2 && this.lon[i] <= vpE + 2;
+      }
+      if (!inView) continue;
       if (this.lat[i] < vpS - 2 || this.lat[i] > vpN + 2) continue;
 
+      /* add to visible set (keep fastest when full) */
       if (visCount < MAX_DRAWN) {
         this.visibleIdx[visCount] = i;
         visCount++;
       } else {
-        /* replace slowest among selected (simple: random) */
-        const ri = Math.floor(Math.random() * MAX_DRAWN);
-        if (spd > this.spd[this.visibleIdx[ri]]) {
-          this.visibleIdx[ri] = i;
+        // find slowest in set and replace if this is faster
+        let slowest = 0;
+        let slowestSpd = Infinity;
+        for (let s = 0; s < MAX_DRAWN; s++) {
+          if (this.spd[this.visibleIdx[s]] < slowestSpd) {
+            slowestSpd = this.spd[this.visibleIdx[s]];
+            slowest = s;
+          }
+        }
+        if (wind.speed > slowestSpd) {
+          this.visibleIdx[slowest] = i;
         }
       }
     }
 
-    /* ── draw only visible particles ──────────────────────────── */
-    const dpr = devicePixelRatio;
-
-    for (let v = 0; v < visCount; v++) {
-      const i = this.visibleIdx[v];
+    /* ── draw visible particles ───────────────────────────────── */
+    for (let vi = 0; vi < visCount; vi++) {
+      const i = this.visibleIdx[vi];
       const s = this.spd[i];
       if (s < 0.3) continue;
 
@@ -217,7 +251,7 @@ export class WindParticleLayer {
         pts.push([p.x, p.y]);
       }
 
-      /* draw trail segments */
+      /* trail segments */
       this.ctx.lineWidth = Math.min(2.5, 0.8 + s * 0.06);
       this.ctx.lineCap = 'round';
       this.ctx.lineJoin = 'round';
@@ -248,6 +282,10 @@ export class WindParticleLayer {
 }
 
 /* ── helpers ──────────────────────────────────────────────────── */
+
+function bilerp(v00: number, v01: number, v10: number, v11: number, fx: number, fy: number): number {
+  return v00 * (1 - fx) * (1 - fy) + v01 * fx * (1 - fy) + v10 * (1 - fx) * fy + v11 * fx * fy;
+}
 
 function speedColor(t: number): [number, number, number] {
   if (t < 0.33) {
