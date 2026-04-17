@@ -12,7 +12,7 @@ const SOURCE_ID = 'wind-arrows';
 const LAYER_ID = 'wind-arrows-lines';
 
 // Grid spacing in degrees (lower = more arrows)
-const GRID_STEP = 8;
+const GRID_STEP = 4;
 
 // Arrow length in degrees (visual only)
 const ARROW_LEN = 2.5;

@@ -11,6 +11,7 @@ import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { addWindLayer, setWindLayerVisible, updateWindArrows } from './weather/WindLayer';
+import { WindParticleLayer } from './weather/WindParticleLayer';
 import { createCloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
@@ -61,6 +62,9 @@ async function init() {
   const cloudLayer = createCloudLayer(weather);
   map.addLayer(cloudLayer);
 
+  // Animated wind particles (canvas overlay)
+  const windParticles = new WindParticleLayer(map, weather);
+
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
 
@@ -78,6 +82,7 @@ async function init() {
       switch (layer) {
         case 'wind':
           setWindLayerVisible(map, active);
+          windParticles.setVisible(active);
           break;
         case 'clouds':
           try {
