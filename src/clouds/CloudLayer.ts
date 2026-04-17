@@ -1,161 +1,242 @@
 /**
- * CloudLayer — MapLibre custom layer that renders Three.js volumetric clouds.
+ * CloudLayer — MapLibre custom layer rendering volumetric clouds.
  *
- * Uses MapLibre's custom layer API to share the WebGL context and
- * get native GL projection matrices. The Three.js CloudRenderer
- * draws ray-marched volumetric clouds on top of the globe.
+ * Pure WebGL2 implementation — no Three.js dependency.
+ * Reads MapLibre's native matrices directly for perfect alignment.
+ * Earth radius matches MapLibre's WGS84 (6371008.8m).
  */
 
 import maplibregl from 'maplibre-gl';
-import * as THREE from 'three';
-import { CloudRenderer } from '../clouds/CloudRenderer';
-import { WeatherManager } from '../weather/WeatherManager';
+import type { WeatherManager } from '../weather/WeatherManager';
+import cloudVertSrc from '../shaders/cloud.vert';
+import cloudFragSrc from '../shaders/cloud.frag';
+import { generatePerlinWorley3D } from '../utils/Noise3D';
+
+const EARTH_RADIUS = 6371008.8;
+const CLOUD_BASE_ALT = 2000;
+const CLOUD_TOP_ALT = 12000;
 
 export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLayerInterface {
-  let renderer: THREE.WebGLRenderer;
-  let scene: THREE.Scene;
-  let camera: THREE.PerspectiveCamera;
-  let cloudParent: THREE.Object3D;
-  let clouds: CloudRenderer;
-  let _cameraMatrix = new THREE.Matrix4();
-  let _cameraPos = new THREE.Vector3();
-  let _cameraQuat = new THREE.Quaternion();
+  let gl: WebGL2RenderingContext;
+  let program: WebGLProgram;
+  let vao: WebGLVertexArrayObject;
+  let noiseTexture: WebGLTexture;
+  let cloudMapTexture: WebGLTexture;
+  let uniforms: Record<string, WebGLUniformLocation | null> = {};
 
   return {
     id: 'volumetric-clouds',
     type: 'custom',
     renderingMode: '3d',
 
-    onAdd(map: maplibregl.Map, gl: WebGLRenderingContext) {
-      // Three.js renderer sharing MapLibre's GL context
-      renderer = new THREE.WebGLRenderer({
-        canvas: map.getCanvas(),
-        context: gl as WebGL2RenderingContext,
-        antialias: false,
-        alpha: true,
-      });
-      renderer.autoClear = false;
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
+    onAdd(map: maplibregl.Map, glCtx: WebGLRenderingContext) {
+      gl = glCtx as WebGL2RenderingContext;
 
-      scene = new THREE.Scene();
+      const vertShader = compileShader(gl, gl.VERTEX_SHADER, cloudVertSrc);
+      const fragShader = compileShader(gl, gl.FRAGMENT_SHADER, cloudFragSrc);
+      program = gl.createProgram()!;
+      gl.attachShader(program, vertShader);
+      gl.attachShader(program, fragShader);
+      gl.linkProgram(program);
 
-      camera = new THREE.PerspectiveCamera();
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error('Cloud shader link error:', gl.getProgramInfoLog(program));
+        return;
+      }
 
-      // Cloud parent — positioned at earth center
-      cloudParent = new THREE.Object3D();
-      scene.add(cloudParent);
+      const names = [
+        'uInvVP', 'uCameraPos', 'uPlanetCenter', 'uPlanetRadius',
+        'uCloudBaseAlt', 'uCloudTopAlt', 'uTime',
+        'uSunDir', 'uSunColor', 'uDensityMult', 'uCoverageMult',
+        'uCloudMap', 'uNoiseTex',
+      ];
+      for (const n of names) uniforms[n] = gl.getUniformLocation(program, n);
 
-      clouds = new CloudRenderer(cloudParent, weather);
+      vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1,
+      ]), gl.STATIC_DRAW);
+      const aPos = gl.getAttribLocation(program, 'aPosition');
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+      gl.bindVertexArray(null);
 
-      // Lighting for cloud shading
-      const sunLight = new THREE.DirectionalLight(0xfff5e0, 1.5);
-      sunLight.position.set(1, 0.5, -0.3);
-      scene.add(sunLight);
-      scene.add(new THREE.AmbientLight(0x6688aa, 0.3));
+      noiseTexture = createNoiseTexture(gl, 32);
+      cloudMapTexture = createCloudCoverageTexture(gl);
+
+      weather.on('dataLoaded', () => updateCloudMapTexture(gl, cloudMapTexture, weather));
+      weather.on('levelChange', () => updateCloudMapTexture(gl, cloudMapTexture, weather));
     },
 
-    render(gl: WebGLRenderingContext, args: any) {
-      if (!renderer || !scene || !camera) return;
+    render(glCtx: WebGLRenderingContext, args: any) {
+      if (!program || !vao) return;
+      if (!weather.isLayerActive('clouds')) return;
 
+      gl = glCtx as WebGL2RenderingContext;
       const projData = args?.defaultProjectionData;
       if (!projData) return;
 
       const vpMatrix: number[] = projData.mainMatrix;
       if (!vpMatrix || vpMatrix.length !== 16) return;
 
-      // ── Extract camera from MapLibre's VP matrix ──────────────────
-      //
-      // The VP matrix maps world coords → clip space.
-      // VP = Projection * View
-      // inv(VP) = inv(View) * inv(Projection)
-      // The camera's world transform (inv(View)) is embedded in inv(VP).
-      //
-      // We extract the camera basis vectors from inv(VP):
-      //   Row 0 (x-axis) → right vector
-      //   Row 1 (y-axis) → up vector
-      //   Row 2 (z-axis) → forward vector
-      //   Row 3 → camera position (after perspective divide)
-      //
-      const invVP = new THREE.Matrix4();
-      invVP.fromArray(vpMatrix);
-      invVP.invert();
+      const invVP = invertMatrix4(vpMatrix);
+      if (!invVP) return;
 
-      // Camera position: transform origin through inv(VP)
-      const v = new THREE.Vector4(0, 0, 0, 1).applyMatrix4(invVP);
-      if (Math.abs(v.w) > 1e-6) {
-        _cameraPos.set(v.x / v.w, v.y / v.w, v.z / v.w);
-      } else {
-        // Fallback: place camera above north pole
-        _cameraPos.set(0, 12742000, 0);
-      }
+      const camPos = extractCameraPos(invVP);
 
-      // Build camera world matrix from inv(VP) basis vectors
-      // MapLibre uses OpenGL convention: camera looks along -Z
-      // Three.js convention: camera also looks along -Z (same!)
-      // So we can use the inv(VP) basis vectors directly.
-      //
-      // invVP in column-major [col0, col1, col2, col3]:
-      //   col0 = right direction + some projection info
-      //   col1 = up direction + some projection info
-      //   col2 = -forward direction + some projection info
-      //   col3 = camera position (in projective space)
-      //
-      // For the rotation, we need the upper-left 3x3 of the
-      // camera's world matrix (inv(View)).
+      gl.useProgram(program);
+      gl.bindVertexArray(vao);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
 
-      // Extract direction vectors from inv(VP) rows
-      // Row 0: [invVP[0], invVP[4], invVP[8]]
-      // Row 1: [invVP[1], invVP[5], invVP[9]]
-      // Row 2: [invVP[2], invVP[6], invVP[10]]
-      const right = new THREE.Vector3(invVP.elements[0], invVP.elements[4], invVP.elements[8]);
-      const up = new THREE.Vector3(invVP.elements[1], invVP.elements[5], invVP.elements[9]);
-      const fwd = new THREE.Vector3(invVP.elements[2], invVP.elements[6], invVP.elements[10]);
+      gl.uniformMatrix4fv(uniforms.uInvVP, false, new Float32Array(invVP));
+      gl.uniform3f(uniforms.uCameraPos, camPos[0], camPos[1], camPos[2]);
+      gl.uniform3f(uniforms.uPlanetCenter, 0, 0, 0);
+      gl.uniform1f(uniforms.uPlanetRadius, EARTH_RADIUS);
+      gl.uniform1f(uniforms.uCloudBaseAlt, CLOUD_BASE_ALT);
+      gl.uniform1f(uniforms.uCloudTopAlt, CLOUD_TOP_ALT);
+      gl.uniform1f(uniforms.uTime, performance.now() * 0.001);
+      gl.uniform3f(uniforms.uSunDir, 0.6, 0.5, -0.4);
+      gl.uniform3f(uniforms.uSunColor, 1.0, 0.95, 0.85);
+      gl.uniform1f(uniforms.uDensityMult, 0.6);
+      gl.uniform1f(uniforms.uCoverageMult, 1.8);
 
-      // Build rotation matrix (pure rotation, no translation)
-      // makeBasis takes column vectors, Three.js convention: +Z = back
-      // inv(VP) rows: right(+X), up(+Y), -fwd(-Z → maps to Three.js camera +Z = back)
-      const rotMat = new THREE.Matrix4();
-      rotMat.makeBasis(right, up, fwd.clone().negate());
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, cloudMapTexture);
+      gl.uniform1i(uniforms.uCloudMap, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, noiseTexture);
+      gl.uniform1i(uniforms.uNoiseTex, 1);
 
-      // Build full camera world matrix: translation * rotation
-      _cameraMatrix.identity();
-      _cameraMatrix.makeTranslation(_cameraPos.x, _cameraPos.y, _cameraPos.z);
-      _cameraMatrix.multiply(rotMat);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-      // Decompose to get position and quaternion
-      _cameraMatrix.decompose(_cameraPos, _cameraQuat, new THREE.Vector3());
-
-      // Apply to Three.js camera
-      camera.position.copy(_cameraPos);
-      camera.quaternion.copy(_cameraQuat);
-      camera.scale.set(1, 1, 1);
-      camera.updateMatrixWorld(true);
-
-      // Override projection matrix with MapLibre's exact projection
-      // Prevents Three.js from recomputing from fov/near/far
-      const projArr = args.projectionMatrix || vpMatrix;
-      camera.projectionMatrix.fromArray(projArr);
-      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-
-      // ── Update clouds ─────────────────────────────────────────────
-      clouds.update(1 / 60, { threeCamera: camera });
-
-      // ── Render on top of MapLibre ─────────────────────────────────
-      // Save GL state, render clouds, restore
-      renderer.state.reset();
-
-      // Enable depth testing so clouds integrate with the globe
-      const gl2 = gl as WebGL2RenderingContext;
-      gl2.enable(gl2.DEPTH_TEST);
-      gl2.depthFunc(gl2.LEQUAL);
-      gl2.enable(gl2.BLEND);
-      gl2.blendFunc(gl2.SRC_ALPHA, gl2.ONE_MINUS_SRC_ALPHA);
-
-      renderer.render(scene, camera);
+      gl.bindVertexArray(null);
+      gl.depthMask(true);
+      gl.enable(gl.CULL_FACE);
     },
 
     onRemove() {
-      if (renderer) renderer.dispose();
+      if (program) gl.deleteProgram(program);
+      if (vao) gl.deleteVertexArray(vao);
+      if (noiseTexture) gl.deleteTexture(noiseTexture);
+      if (cloudMapTexture) gl.deleteTexture(cloudMapTexture);
     },
   };
+}
+
+function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
+  const shader = gl.createShader(type)!;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+  }
+  return shader;
+}
+
+function createNoiseTexture(gl: WebGL2RenderingContext, size: number): WebGLTexture {
+  const rawData = generatePerlinWorley3D(size);
+  const data = new Float32Array(size * size * size * 4);
+  for (let i = 0; i < rawData.length; i++) {
+    const v = rawData[i];
+    data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 1;
+  }
+  const tex = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_3D, tex);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32F, size, size, size, 0, gl.RGBA, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.REPEAT);
+  return tex;
+}
+
+function createCloudCoverageTexture(gl: WebGL2RenderingContext): WebGLTexture {
+  const w = 360, h = 180;
+  const data = new Float32Array(w * h * 4);
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const idx = (j * w + i) * 4;
+      const lat = (j / h - 0.5) * Math.PI;
+      const itcz = Math.exp(-lat * lat * 15) * 0.7;
+      const storm30 = Math.exp(-Math.pow(Math.abs(lat) - 0.52, 2) * 20) * 0.4;
+      const storm60 = Math.exp(-Math.pow(Math.abs(lat) - 1.05, 2) * 15) * 0.3;
+      const nx = i / w * 6, ny = j / h * 6;
+      const noise = (Math.sin(nx * 2.1 + ny * 1.7) * 0.5 + 0.5) *
+                    (Math.cos(nx * 1.3 - ny * 2.3) * 0.5 + 0.5);
+      data[idx] = Math.min(1.0, itcz + storm30 + storm60 + noise * 0.2);
+      data[idx + 1] = 0.7; data[idx + 2] = 0.4; data[idx + 3] = 1;
+    }
+  }
+  const tex = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+function updateCloudMapTexture(gl: WebGL2RenderingContext, tex: WebGLTexture, weather: WeatherManager) {
+  const grid = weather.getGrid('surface');
+  if (!grid) return;
+  const { width, height, fields } = grid;
+  const data = new Float32Array(width * height * 4);
+  for (let j = 0; j < height; j++) {
+    for (let i = 0; i < width; i++) {
+      const idx = j * width + i, t = idx * 4;
+      data[t] = fields.cloudFraction?.[idx] ?? 0;
+      data[t + 1] = fields.humidity?.[idx] ?? 0.5;
+      data[t + 2] = 0.5; data[t + 3] = 1;
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, data);
+}
+
+function invertMatrix4(m: number[]): number[] | null {
+  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+  const b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10, b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30, b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32;
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (Math.abs(det) < 1e-12) return null;
+  const id = 1 / det;
+  return [
+    (a11 * b11 - a12 * b10 + a13 * b09) * id,
+    (a02 * b10 - a01 * b11 - a03 * b09) * id,
+    (a31 * b05 - a32 * b04 + a33 * b03) * id,
+    (a22 * b04 - a21 * b05 - a23 * b03) * id,
+    (a12 * b08 - a10 * b11 - a13 * b07) * id,
+    (a00 * b11 - a02 * b08 + a03 * b07) * id,
+    (a32 * b02 - a30 * b05 - a33 * b01) * id,
+    (a20 * b05 - a22 * b02 + a23 * b01) * id,
+    (a10 * b10 - a11 * b08 + a13 * b06) * id,
+    (a01 * b08 - a00 * b10 - a03 * b06) * id,
+    (a30 * b04 - a31 * b02 + a33 * b00) * id,
+    (a21 * b02 - a20 * b04 - a23 * b00) * id,
+    (a11 * b07 - a10 * b09 - a12 * b06) * id,
+    (a00 * b09 - a01 * b07 + a02 * b06) * id,
+    (a31 * b01 - a30 * b03 - a32 * b00) * id,
+    (a20 * b03 - a21 * b01 + a22 * b00) * id,
+  ];
+}
+
+function extractCameraPos(invVP: number[]): [number, number, number] {
+  const w = invVP[15];
+  if (Math.abs(w) > 1e-6) return [invVP[3] / w, invVP[7] / w, invVP[11] / w];
+  return [0, EARTH_RADIUS * 2, 0];
 }
