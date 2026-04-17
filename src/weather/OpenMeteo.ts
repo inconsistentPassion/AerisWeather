@@ -22,6 +22,7 @@ const CACHE_MS = 15 * 60 * 1000;
 
 interface CachedGrid {
   timestamp: number;
+  model: string;
   grid: {
     width: number;
     height: number;
@@ -52,8 +53,8 @@ export async function fetchRealWeatherGrid(): Promise<{
     cloudFraction: Float32Array;
   };
 } | null> {
-  // Return cache if fresh
-  if (cache && Date.now() - cache.timestamp < CACHE_MS) {
+  // Return cache if fresh (but not if model changed)
+  if (cache && Date.now() - cache.timestamp < CACHE_MS && cache.model === 'gfs_seamless') {
     return cache.grid;
   }
 
@@ -104,7 +105,7 @@ export async function fetchRealWeatherGrid(): Promise<{
     // Interpolate sparse samples to full 360×180 grid
     const grid = interpolateToGrid(allData, lats, lons, 360, 180);
 
-    cache = { timestamp: Date.now(), grid };
+    cache = { timestamp: Date.now(), model: 'gfs_seamless', grid };
     return grid;
   } catch (e) {
     console.warn('[OpenMeteo] Fetch failed:', e);
@@ -140,6 +141,7 @@ async function fetchBatch(
       'cloud_cover',
     ].join(','),
     wind_speed_unit: 'ms',
+    models: 'gfs_seamless',
     timezone: 'auto',
   });
 
