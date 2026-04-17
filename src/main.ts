@@ -2,25 +2,53 @@
  * AerisWeather — Main Entry Point
  * "Windy meets MSFS, but in the browser."
  *
- * Architecture:
- *   MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere (built-in)
- *   Three.js        → volumetric clouds (custom layer, shared GL context)
- *   WeatherManager  → data pipeline (shared between both)
+ * MapLibre GL JS handles everything: globe, tiles, zoom, camera, atmosphere.
+ * Volumetric clouds will be re-added as a custom layer once the base globe works.
  */
 
-import { createMapGlobe } from './scene/MapGlobe';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
+import { WeatherManager } from './weather/WeatherManager';
+
+const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
 async function init() {
   const container = document.getElementById('app')!;
   const uiContainer = document.getElementById('ui-overlay')!;
 
-  // ── MapLibre globe + Three.js cloud overlay ────────────────────────
-  const globe = createMapGlobe(container);
-  const { map, weather } = globe;
+  // Ensure container has dimensions
+  container.style.width = '100%';
+  container.style.height = '100%';
 
-  // ── Wait for map to load ───────────────────────────────────────────
-  await globe.ready;
+  const weather = new WeatherManager();
+
+  // ── MapLibre globe ─────────────────────────────────────────────────
+  const map = new maplibregl.Map({
+    container,
+    style: STYLE_URL,
+    center: [0, 20],
+    zoom: 2.5,
+    pitch: 49,
+    bearing: -20,
+    maxPitch: 80,
+    attributionControl: false,
+    renderWorldCopies: false,
+  });
+
+  // Apply globe projection on style load
+  map.on('style.load', () => {
+    try {
+      (map as any).setProjection({ type: 'globe' });
+    } catch (e) {
+      console.warn('setProjection failed:', e);
+    }
+  });
+
+  map.on('error', (e) => console.error('MapLibre error:', e));
+
+  // ── Wait for load ──────────────────────────────────────────────────
+  await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
@@ -31,17 +59,6 @@ async function init() {
     onLevelChange: (l) => weather.setLevel(l),
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
-
-      // Toggle cloud layer visibility in MapLibre
-      if (layer === 'clouds') {
-        try {
-          if (active) {
-            map.setLayoutProperty('three-clouds', 'visibility', 'visible');
-          } else {
-            map.setLayoutProperty('three-clouds', 'visibility', 'none');
-          }
-        } catch { /* layer may not exist yet */ }
-      }
     },
     onCameraMode: (mode) => {
       if (mode === 'orbit') {
@@ -99,7 +116,6 @@ async function init() {
   }
   autoRotateTick();
 
-  // Stop auto-rotate on user interaction
   map.on('mousedown', () => { autoRotate = false; });
   map.on('touchstart', () => { autoRotate = false; });
 }
