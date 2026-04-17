@@ -28,8 +28,8 @@ async function init() {
   const stars = createSkybox();
   scene.add(stars);
 
-  // Globe (real NASA Blue Marble textures)
-  const { mesh: globe, onLoad: globeLoaded } = createGlobe();
+  // Globe (procedural Earth with recognizable continents)
+  const globe = createGlobe();
   scene.add(globe);
 
   // Globe lighting (day/night)
@@ -186,7 +186,7 @@ async function init() {
   }
 
   // ── Start ───────────────────────────────────────────────────────────
-  await Promise.all([weather.loadInitial(), globeLoaded]);
+  await weather.loadInitial();
   animate(performance.now());
 
   // ── Resize ──────────────────────────────────────────────────────────
