@@ -68,6 +68,40 @@ export function createCamera(container: HTMLElement) {
   window.addEventListener('keydown', (e) => { keys[e.code] = true; });
   window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
+  // Touch support
+  let lastTouchDist = 0;
+  container.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1 && mode === 'orbit') {
+      isDragging = true;
+      lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    } else if (e.touches.length === 2) {
+      lastTouchDist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+    }
+  }, { passive: true });
+
+  container.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 1 && mode === 'orbit' && isDragging) {
+      const dx = e.touches[0].clientX - lastMouse.x;
+      const dy = e.touches[0].clientY - lastMouse.y;
+      orbitPhi -= dx * 0.005;
+      orbitTheta = Math.max(0.1, Math.min(Math.PI - 0.1, orbitTheta - dy * 0.005));
+      lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    } else if (e.touches.length === 2 && mode === 'orbit') {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      orbitDistance *= lastTouchDist / dist;
+      orbitDistance = Math.max(GLOBE_RADIUS * 1.2, Math.min(GLOBE_RADIUS * 50, orbitDistance));
+      lastTouchDist = dist;
+    }
+  }, { passive: true });
+
+  container.addEventListener('touchend', () => { isDragging = false; }, { passive: true });
+
   // Pointer lock for free-flight
   container.addEventListener('click', () => {
     if (mode === 'freeflight') {

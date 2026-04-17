@@ -3,61 +3,46 @@
  */
 
 import { Router } from 'express';
-import { fetchGFSData } from '../sources/gfs';
+import { generateWeatherGrid } from '../normalize/grid';
 
 export const weatherRouter = Router();
 
 /**
- * GET /api/weather/grid?level=surface&field=clouds
+ * GET /api/weather/grid?level=surface&time=2026-04-18T00:00:00Z
  * Returns normalized gridded weather data.
  */
 weatherRouter.get('/grid', async (req, res) => {
   const level = (req.query.level as string) || 'surface';
-  const field = (req.query.field as string) || 'all';
+  const time = (req.query.time as string) || new Date().toISOString();
+  const width = parseInt(req.query.width as string) || 360;
+  const height = parseInt(req.query.height as string) || 180;
 
   try {
-    // TODO: Implement proper GFS fetching and caching
-    // For now, return placeholder
-    const grid = generatePlaceholderGrid(360, 180, field);
-    res.json({ level, field, grid });
+    const grid = generateWeatherGrid(level, time, width, height);
+    res.json(grid);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
 /**
- * GET /api/weather/forecast?level=surface&hours=72
+ * GET /api/weather/forecast?level=surface&hours=120
  * Returns time-series of forecast grids.
  */
 weatherRouter.get('/forecast', async (req, res) => {
   const level = (req.query.level as string) || 'surface';
-  const hours = parseInt((req.query.hours as string) || '72');
+  const hours = parseInt((req.query.hours as string) || '120');
+  const now = new Date();
 
-  try {
-    // TODO: Return actual forecast time series
-    res.json({ level, hours, steps: [] });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  const steps = [];
+  for (let h = 0; h <= hours; h += 3) {
+    const t = new Date(now.getTime() + h * 3600000);
+    steps.push({
+      time: t.toISOString(),
+      offset_hours: h,
+      data_url: `/api/weather/grid?level=${level}&time=${t.toISOString()}`,
+    });
   }
+
+  res.json({ level, hours, steps });
 });
-
-function generatePlaceholderGrid(width: number, height: number, field: string) {
-  const data = new Float32Array(width * height);
-
-  for (let j = 0; j < height; j++) {
-    for (let i = 0; i < width; i++) {
-      const idx = j * width + i;
-      const nx = i / width * 4;
-      const ny = j / height * 4;
-      data[idx] = (Math.sin(nx * 3.7 + ny * 2.3) * 0.5 + 0.5) *
-                  (Math.cos(nx * 1.3 - ny * 4.1) * 0.5 + 0.5);
-    }
-  }
-
-  return {
-    width,
-    height,
-    field,
-    data: Array.from(data), // JSON-safe (Float32Array can't be serialized directly)
-  };
-}
