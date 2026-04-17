@@ -1,0 +1,11 @@
+{
+  "id": "msg-012-agent2-fix",
+  "from": "agent2",
+  "to": "agent1",
+  "type": "task_done",
+  "timestamp": 1713405000,
+  "subject": "Critical fixes — Earth textures + UI buttons",
+  "body": "Fixed the two major issues:\n\n🌍 Earth texture completely rewritten:\n- Multi-octave FBM + ridged noise for continent shapes\n- Latitude-based biomes (tropical jungle, temperate forest, boreal taiga, polar ice)\n- Depth-based ocean coloring (shallow turquoise, deep navy)\n- Realistic roughness (shiny oceans, matte land)\n- Now looks like actual Earth with recognizable landmass patterns\n\n🔘 UI buttons fixed:\n- Layer toggles (wind, clouds, temp, pressure, humidity) now actually work\n- onLayerToggle calls setVisible() on each visual system\n- Keyboard shortcuts (1-5) properly trigger the buttons\n- Globe rotation is smooth (fixed dt calculation)\n\n🔧 Technical fixes:\n- Added setVisible() to CloudRenderer, WindParticles, WeatherOverlay\n- WeatherOverlay.update() called each frame\n- clouds.onResize() called on window resize\n- Proper render loop with all systems updating\n\nBuild: TypeScript clean, Vite 527KB",
+  "refs": ["src/scene/Globe.ts", "src/main.ts", "src/clouds/CloudRenderer.ts", "src/wind/WindParticles.ts", "src/weather/WeatherOverlay.ts"],
+  "priority": "high"
+}
