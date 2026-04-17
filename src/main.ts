@@ -3,15 +3,14 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Custom layers   → volumetric clouds (Three.js), wind arrows (GeoJSON)
+ * Custom layers   → volumetric clouds, wind particles
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
-import { addWindLayer, setWindLayerVisible, updateWindArrows } from './weather/WindLayer';
-import { WindParticleLayer } from './weather/WindParticleLayer';
+import { createWindParticleLayer } from './weather/WindParticleLayer';
 import { createCloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
@@ -53,24 +52,16 @@ async function init() {
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
   // ── Add weather layers ─────────────────────────────────────────────
-  // Wind arrows (MapLibre native GeoJSON layer)
-  addWindLayer(map, weather);
-  // Start visible
-  setWindLayerVisible(map, true);
+  // Animated wind particles (WebGL custom layer — on the globe surface)
+  const windLayer = createWindParticleLayer(weather);
+  map.addLayer(windLayer);
 
-  // Volumetric clouds (Three.js custom layer)
+  // Volumetric clouds (WebGL custom layer)
   const cloudLayer = createCloudLayer(weather);
   map.addLayer(cloudLayer);
 
-  // Animated wind particles (canvas overlay)
-  const windParticles = new WindParticleLayer(map, weather);
-
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
-
-  // ── Update wind arrows after data is loaded ───────────────────────
-  // (source/layer already created by addWindLayer above)
-  updateWindArrows(map, weather);
 
   // ── UI ─────────────────────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -81,8 +72,10 @@ async function init() {
 
       switch (layer) {
         case 'wind':
-          setWindLayerVisible(map, active);
-          windParticles.setVisible(active);
+          try {
+            map.setLayoutProperty('wind-particles', 'visibility',
+              active ? 'visible' : 'none');
+          } catch { /* not yet added */ }
           break;
         case 'clouds':
           try {
