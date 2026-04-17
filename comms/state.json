@@ -2,15 +2,15 @@
   "agents": {
     "agent1": {
       "status": "working",
-      "currentTask": "cloud-shader-improvements",
-      "lastHeartbeat": 1713400000,
-      "completedTasks": ["scaffold", "noise-generation", "atmosphere", "skybox", "build-verification"]
+      "currentTask": "visual-polish",
+      "lastHeartbeat": 1713400500,
+      "completedTasks": ["scaffold", "noise-generation", "atmosphere", "skybox", "build-verification", "cloud-shader-v2", "wind-particles-v2", "day-night-lighting", "weather-overlays", "responsive-ui-v1"]
     },
     "agent2": {
-      "status": "working",
-      "currentTask": "gfs-pipeline",
-      "lastHeartbeat": 1713400001,
-      "completedTasks": ["earth-textures", "touch-controls", "weather-generator", "weather-api"]
+      "status": "idle",
+      "currentTask": null,
+      "lastHeartbeat": 1713401000,
+      "completedTasks": ["earth-textures", "touch-controls", "weather-generator", "weather-api", "gfs-adapter", "disk-cache", "responsive-ui-v2"]
     }
   },
   "locks": {},
