@@ -15,6 +15,7 @@ const MAX_DRAWN = 1000;
 const TRAIL_LEN = 8;
 const MAX_AGE = 180;
 const STEP_DEG = 0.0012;
+const GLOBE_RADIUS = 6371000; // metres (MapLibre WGS84)
 
 export class WindParticleLayer {
   private map: maplibregl.Map;
@@ -134,6 +135,26 @@ export class WindParticleLayer {
     return { u: uVal, v: vVal, speed: Math.sqrt(uVal * uVal + vVal * vVal) };
   }
 
+  /** Check if a globe point is on the camera-facing hemisphere */
+  private isFrontSide(lon: number, lat: number): boolean {
+    const t = (this.map as any).transform;
+    const center = this.map.getCenter();
+    if (!t || !center) return true;
+
+    const camX = t.cameraX ?? 0;
+    const camY = t.cameraY ?? 0;
+    const camZ = t.cameraZ ?? (GLOBE_RADIUS * 3);
+
+    const lr = lon * Math.PI / 180;
+    const la = lat * Math.PI / 180;
+    const px = GLOBE_RADIUS * Math.cos(la) * Math.cos(lr);
+    const py = GLOBE_RADIUS * Math.cos(la) * Math.sin(lr);
+    const pz = GLOBE_RADIUS * Math.sin(la);
+
+    // dot product with camera direction (camera → origin)
+    return px * camX + py * camY + pz * camZ > GLOBE_RADIUS * GLOBE_RADIUS * 0.15;
+  }
+
   /* ── frame ──────────────────────────────────────────────────── */
 
   private frame(): void {
@@ -209,6 +230,7 @@ export class WindParticleLayer {
       }
       if (!inView) continue;
       if (this.lat[i] < vpS - 2 || this.lat[i] > vpN + 2) continue;
+      if (!this.isFrontSide(this.lon[i], this.lat[i])) continue;
 
       /* add to visible set (keep fastest when full) */
       if (visCount < MAX_DRAWN) {
@@ -243,12 +265,18 @@ export class WindParticleLayer {
       const b = i * TRAIL_LEN;
       const h = this.trailHead[i];
 
-      /* project trail points */
+      /* project trail points (skip back-facing) */
       const pts: [number, number][] = [];
       for (let t = 0; t < TRAIL_LEN; t++) {
         const slot = (h + t) % TRAIL_LEN;
-        const p = this.map.project([this.trailLon[b + slot], this.trailLat[b + slot]] as any);
-        pts.push([p.x, p.y]);
+        const tl = this.trailLon[b + slot];
+        const tla = this.trailLat[b + slot];
+        if (!this.isFrontSide(tl, tla)) {
+          pts.push([-9999, -9999]); // sentinel for back-facing
+        } else {
+          const p = this.map.project([tl, tla] as any);
+          pts.push([p.x, p.y]);
+        }
       }
 
       /* trail segments */
@@ -257,6 +285,8 @@ export class WindParticleLayer {
       this.ctx.lineJoin = 'round';
 
       for (let t = 0; t < TRAIL_LEN - 1; t++) {
+        // skip segments touching back-facing points
+        if (pts[t][0] < -9000 || pts[t + 1][0] < -9000) continue;
         const segAlpha = ((t + 1) / TRAIL_LEN) * ageAlpha * 0.75;
         this.ctx.beginPath();
         this.ctx.moveTo(pts[t][0], pts[t][1]);
@@ -265,13 +295,14 @@ export class WindParticleLayer {
         this.ctx.stroke();
       }
 
-      /* head dot */
+      /* head dot (skip if back-facing) */
       const hp = pts[TRAIL_LEN - 1];
-      this.ctx.beginPath();
-      this.ctx.arc(hp[0], hp[1], 1.2 + s * 0.04, 0, Math.PI * 2);
-      this.ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${(ageAlpha * 0.9).toFixed(3)})`;
-      this.ctx.fill();
-    }
+      if (hp[0] > -9000) {
+        this.ctx.beginPath();
+        this.ctx.arc(hp[0], hp[1], 1.2 + s * 0.04, 0, Math.PI * 2);
+        this.ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${(ageAlpha * 0.9).toFixed(3)})`;
+        this.ctx.fill();
+      }
 
     /* replenish */
     const budget = Math.round(TOTAL_PARTICLES * 0.02);
