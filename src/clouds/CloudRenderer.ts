@@ -277,12 +277,16 @@ export class CloudRenderer {
     renderer.render(this.upscaleScene, this.upscaleCamera);
   }
 
-  private onResize(): void {
+  onResize(): void {
     const w = Math.floor(window.innerWidth / 2);
     const h = Math.floor(window.innerHeight / 2);
     this.renderTarget.setSize(w, h);
     this.historyTarget.setSize(w, h);
     this.upscaleMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+  }
+
+  setVisible(visible: boolean): void {
+    this.mesh.visible = visible;
   }
 
   /**

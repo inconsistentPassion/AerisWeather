@@ -216,4 +216,24 @@ export class WeatherOverlay {
 
     this.dataTexture.needsUpdate = true;
   }
+
+  /**
+   * Set visibility of a specific overlay layer.
+   */
+  setVisible(layer: WeatherLayer, active: boolean): void {
+    this.handleLayerToggle(layer, active);
+  }
+
+  /**
+   * Update per frame.
+   */
+  update(dt: number): void {
+    // Sync rotation with globe
+    // The mesh rotates with the scene, no need for manual sync
+
+    // Update data if visible
+    if (this.mesh.visible) {
+      this.updateDataTexture();
+    }
+  }
 }

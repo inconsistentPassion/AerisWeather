@@ -239,4 +239,8 @@ export class WindParticles {
     posAttr.needsUpdate = true;
     colorAttr.needsUpdate = true;
   }
+
+  setVisible(visible: boolean): void {
+    this.lineSegments.visible = visible;
+  }
 }
