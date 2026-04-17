@@ -160,4 +160,20 @@ export class WeatherOverlay {
 
     config.texture.needsUpdate = true;
   }
+
+  /**
+   * Set visibility of a specific overlay layer.
+   */
+  setVisible(layer: WeatherLayer, active: boolean): void {
+    this.onLayerToggle(layer, active);
+  }
+
+  /**
+   * Update per frame.
+   */
+  update(dt: number): void {
+    if (this.activeLayer && this.layers.has(this.activeLayer)) {
+      this.updateTexture(this.layers.get(this.activeLayer)!, this.activeLayer);
+    }
+  }
 }
