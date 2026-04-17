@@ -6,6 +6,7 @@
  */
 
 import type { WeatherLevel, WeatherLayer, WeatherGrid, TimeRange } from './types';
+import { fetchRealWeatherGrid } from './OpenMeteo';
 
 const DEFAULT_LEVELS: WeatherLevel[] = ['surface', '850hPa', '500hPa', 'FL100', 'FL200', 'FL300'];
 const DEFAULT_LAYERS: WeatherLayer[] = ['wind', 'temperature', 'pressure', 'humidity', 'clouds'];
@@ -36,33 +37,43 @@ export class WeatherManager {
     this.setLoading(true);
     
     try {
-      // Fetch current + future time steps for interpolation
-      const now = Date.now();
-      const steps = [now, now + 3 * 3600000, now + 6 * 3600000]; // now, +3h, +6h
-      
-      for (const time of steps) {
-        const grid = await this.fetchGrid('surface', time);
-        if (grid) {
-          this.addTimeCache('surface', time, grid);
+      // Priority 1: Real data from Open-Meteo (free, no key, global)
+      const realGrid = await fetchRealWeatherGrid();
+      if (realGrid) {
+        this.grids.set('surface', realGrid);
+        this.addTimeCache('surface', Date.now(), realGrid);
+        console.log('[Weather] Using real Open-Meteo data');
+      } else {
+        // Priority 2: Backend server
+        const serverGrid = await this.fetchGrid('surface', Date.now());
+        if (serverGrid) {
+          this.grids.set('surface', serverGrid);
+          this.addTimeCache('surface', Date.now(), serverGrid);
+          console.log('[Weather] Using server data');
+        } else {
+          // Priority 3: Procedural fallback
+          this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
+          console.log('[Weather] Using procedural fallback');
         }
       }
       
-      // Set current grid
-      const entries = this.timeCache.get('surface') || [];
-      if (entries.length > 0) {
-        this.grids.set('surface', entries[0].grid);
-        this.emit('dataLoaded', { level: 'surface' });
-      } else {
-        // Fallback
-        this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
-        this.emit('dataLoaded', { level: 'surface' });
-      }
-    } catch {
+      this.emit('dataLoaded', { level: 'surface' });
+    } catch (e) {
+      console.warn('[Weather] Load failed:', e);
       this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
       this.emit('dataLoaded', { level: 'surface' });
     }
     
     this.setLoading(false);
+
+    // Refresh from Open-Meteo every 15 minutes
+    setInterval(async () => {
+      const fresh = await fetchRealWeatherGrid();
+      if (fresh) {
+        this.grids.set('surface', fresh);
+        this.emit('dataLoaded', { level: 'surface' });
+      }
+    }, 15 * 60 * 1000);
   }
 
   /**
