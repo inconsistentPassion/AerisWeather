@@ -73,6 +73,16 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
             <button class="cam-btn" data-mode="freeflight">✈️ Free</button>
           </div>
         </div>
+
+        <!-- Legend (shown when weather layer active) -->
+        <div class="ui-panel legend-panel hidden" id="legend-panel">
+          <label id="legend-title">Temperature</label>
+          <div class="legend-bar" id="legend-bar"></div>
+          <div class="legend-labels">
+            <span id="legend-min">-40°C</span>
+            <span id="legend-max">40°C</span>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -252,6 +262,23 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
         font-size: 10px;
       }
     }
+
+    /* Legend */
+    .legend-panel {
+      min-width: 120px;
+    }
+    .legend-panel.hidden { display: none; }
+    .legend-bar {
+      height: 12px;
+      border-radius: 3px;
+      margin: 4px 0 2px;
+    }
+    .legend-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: rgba(160, 190, 230, 0.6);
+    }
   `;
   document.head.appendChild(style);
 
@@ -301,12 +328,68 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
     });
   });
 
+  // Legend
+  const legendPanel = container.querySelector('#legend-panel') as HTMLElement;
+  const legendTitle = container.querySelector('#legend-title')!;
+  const legendBar = container.querySelector('#legend-bar') as HTMLElement;
+  const legendMin = container.querySelector('#legend-min')!;
+  const legendMax = container.querySelector('#legend-max')!;
+
+  const legendConfig: Record<string, { title: string; gradient: string; min: string; max: string }> = {
+    temperature: {
+      title: 'Temperature',
+      gradient: 'linear-gradient(90deg, #0066cc, #88ccff, #ffffff, #ffcc44, #ff4400)',
+      min: '-40°C',
+      max: '40°C',
+    },
+    pressure: {
+      title: 'Pressure',
+      gradient: 'linear-gradient(90deg, #6633aa, #3366cc, #33cc88, #cccc00)',
+      min: '980 hPa',
+      max: '1040 hPa',
+    },
+    humidity: {
+      title: 'Humidity',
+      gradient: 'linear-gradient(90deg, #886633, #44aa44, #2266aa)',
+      min: '0%',
+      max: '100%',
+    },
+  };
+
+  function updateLegend(layer: string) {
+    const config = legendConfig[layer];
+    if (config) {
+      legendPanel.classList.remove('hidden');
+      legendTitle.textContent = config.title;
+      legendBar.style.background = config.gradient;
+      legendMin.textContent = config.min;
+      legendMax.textContent = config.max;
+    }
+  }
+
   // Layer toggles
   container.querySelectorAll('.layer-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const layer = btn.getAttribute('data-layer') as WeatherLayer;
       const isActive = btn.classList.toggle('active');
       actions.onLayerToggle(layer, isActive);
+
+      // Show/hide legend
+      if (isActive && legendConfig[layer]) {
+        updateLegend(layer);
+      } else if (!isActive && legendConfig[layer]) {
+        // Check if any other legend-able layer is active
+        const hasLegendLayer = Array.from(container.querySelectorAll('.layer-btn.active'))
+          .some(b => legendConfig[b.getAttribute('data-layer')!]);
+        if (!hasLegendLayer) {
+          legendPanel.classList.add('hidden');
+        } else {
+          // Show first active legend layer
+          const first = Array.from(container.querySelectorAll('.layer-btn.active'))
+            .find(b => legendConfig[b.getAttribute('data-layer')!]);
+          if (first) updateLegend(first.getAttribute('data-layer')!);
+        }
+      }
     });
   });
 
