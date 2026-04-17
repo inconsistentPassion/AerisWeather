@@ -1,0 +1,18 @@
+{
+  "agents": {
+    "agent1": {
+      "status": "working",
+      "currentTask": "initial-setup",
+      "lastHeartbeat": 0,
+      "completedTasks": ["scaffold", "noise-generation", "atmosphere", "skybox", "build-verification"]
+    },
+    "agent2": {
+      "status": "unknown",
+      "currentTask": null,
+      "lastHeartbeat": 0,
+      "completedTasks": []
+    }
+  },
+  "locks": {},
+  "sessionStart": 0
+}
