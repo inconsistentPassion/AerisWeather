@@ -11,7 +11,7 @@ import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
-import { createCloudLayer } from './clouds/CloudLayer';
+import { CloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -55,9 +55,8 @@ async function init() {
   // Animated wind particles (MapLibre circle layer — globe-correct)
   const windParticles = new WindParticleLayer(map, weather);
 
-  // Volumetric clouds (WebGL custom layer)
-  const cloudLayer = createCloudLayer(weather);
-  map.addLayer(cloudLayer);
+  // Volumetric clouds (canvas overlay — same approach as wind particles)
+  const cloudLayer = new CloudLayer(map, weather);
 
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
@@ -74,10 +73,7 @@ async function init() {
           windParticles.setVisible(active);
           break;
         case 'clouds':
-          try {
-            map.setLayoutProperty('volumetric-clouds', 'visibility',
-              active ? 'visible' : 'none');
-          } catch { /* not yet added */ }
+          cloudLayer.setVisible(active);
           break;
       }
     },
