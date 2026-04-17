@@ -8,6 +8,7 @@ import { createGlobe } from './scene/Globe';
 import { createAtmosphere } from './scene/Atmosphere';
 import { createCamera } from './scene/Camera';
 import { createSkybox } from './scene/Skybox';
+import { GlobeLighting } from './scene/GlobeLighting';
 import { WeatherManager } from './weather/WeatherManager';
 import { CloudRenderer } from './clouds/CloudRenderer';
 import { WindParticles } from './wind/WindParticles';
@@ -28,6 +29,9 @@ async function init() {
   // Globe (procedural earth textures by AgentA)
   const globe = createGlobe();
   scene.add(globe);
+
+  // Globe lighting (day/night cycle + night glow)
+  const globeLighting = new GlobeLighting(scene, globe);
 
   // Atmosphere shell (Group with main + inner meshes)
   const atmosphereGroup = createAtmosphere();
@@ -87,6 +91,11 @@ async function init() {
         mat.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
       }
     }
+
+    // Update globe lighting (slowly rotating sun)
+    const hourOfDay = (Date.now() / 3600000) % 24;
+    globeLighting.updateTime(hourOfDay);
+    globeLighting.updateCameraPosition(camera.threeCamera.position);
 
     renderer.render(scene, camera.threeCamera);
   }
