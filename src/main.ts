@@ -9,7 +9,6 @@ import { createAtmosphere } from './scene/Atmosphere';
 import { createCamera } from './scene/Camera';
 import { createSkybox } from './scene/Skybox';
 import { GlobeLighting } from './scene/GlobeLighting';
-import { CloudShadow } from './scene/CloudShadow';
 import { WeatherManager } from './weather/WeatherManager';
 import { WeatherOverlay } from './weather/WeatherOverlay';
 import { CloudRenderer } from './clouds/CloudRenderer';
@@ -28,17 +27,18 @@ async function init() {
   const stars = createSkybox();
   scene.add(stars);
 
-  // Globe (real NASA Blue Marble textures)
-  const { mesh: globe, onLoad: globeLoaded } = createGlobe();
+  // Globe (procedural earth textures by AgentA)
+  const globe = createGlobe();
   scene.add(globe);
 
-  // Globe lighting (day/night)
+  // Globe lighting (day/night cycle + night glow)
   const globeLighting = new GlobeLighting(scene, globe);
 
-  // Atmosphere
+  // Atmosphere shell (Group with main + inner meshes)
   const atmosphereGroup = createAtmosphere();
   scene.add(atmosphereGroup);
 
+  // Collect atmosphere shader materials for uniform updates
   const atmosphereMaterials: THREE.ShaderMaterial[] = [];
   atmosphereGroup.traverse((child) => {
     if (child instanceof THREE.Mesh && child.material instanceof THREE.ShaderMaterial) {
@@ -46,59 +46,34 @@ async function init() {
     }
   });
 
-  // Camera
+  // Camera (orbit + free-flight + touch)
   const camera = createCamera(container);
 
-  // Weather data
+  // Weather data manager
   const weather = new WeatherManager();
 
-  // Clouds
+  // Volumetric clouds (half-res render + upscale)
   const clouds = new CloudRenderer(scene, weather);
-  clouds.setVisible(true);
 
-  // Cloud shadows
-  const cloudShadow = new CloudShadow(scene, globe, weather);
-
-  // Weather overlays
+  // Weather data overlays (temperature, pressure, humidity)
   const weatherOverlay = new WeatherOverlay(scene, weather);
 
   // Wind particles
   const wind = new WindParticles(scene, weather);
 
-  // ── UI with proper layer toggle wiring ──────────────────────────────
+  // UI controls
   const ui = createUI(uiContainer, weather, {
     onTimeChange: (t) => weather.setTime(t),
     onLevelChange: (l) => weather.setLevel(l),
-    onLayerToggle: (layer, active) => {
-      weather.toggleLayer(layer, active);
-
-      // Actually update visuals!
-      switch (layer) {
-        case 'clouds':
-          clouds.setVisible(active);
-          cloudShadow.getMesh().visible = active;
-          break;
-        case 'wind':
-          wind.setVisible(active);
-          break;
-        case 'temperature':
-          weatherOverlay.setVisible('temperature', active);
-          break;
-        case 'pressure':
-          weatherOverlay.setVisible('pressure', active);
-          break;
-        case 'humidity':
-          weatherOverlay.setVisible('humidity', active);
-          break;
-      }
-    },
+    onLayerToggle: (layer, active) => weather.toggleLayer(layer, active),
     onCameraMode: (mode) => camera.setMode(mode),
   });
 
-  // ── Globe auto-rotation ─────────────────────────────────────────────
-  let autoRotate = true;
-  let globeAngle = 0;
+  // Globe auto-rotation — disabled until clouds are parented to globe
+  let autoRotate = false;
+  const ROTATION_SPEED = 0.00003;
 
+  // --- Keyboard shortcuts ---
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
       case 'Space':
@@ -106,97 +81,82 @@ async function init() {
         autoRotate = !autoRotate;
         break;
       case 'KeyR':
+        // Reset camera to default orbit
         camera.setMode('orbit');
-        globeAngle = 0;
-        globe.rotation.y = 0;
         break;
       case 'Digit1':
-        document.getElementById('btn-wind')?.click();
+        weather.toggleLayer('wind', !weather.isLayerActive('wind'));
         break;
       case 'Digit2':
-        document.getElementById('btn-clouds')?.click();
+        weather.toggleLayer('clouds', !weather.isLayerActive('clouds'));
         break;
       case 'Digit3':
-        document.getElementById('btn-temp')?.click();
+        weather.toggleLayer('temperature', !weather.isLayerActive('temperature'));
         break;
       case 'Digit4':
-        document.getElementById('btn-pressure')?.click();
+        weather.toggleLayer('pressure', !weather.isLayerActive('pressure'));
         break;
       case 'Digit5':
-        document.getElementById('btn-humidity')?.click();
+        weather.toggleLayer('humidity', !weather.isLayerActive('humidity'));
         break;
     }
   });
 
+  // Stop auto-rotate when user interacts
   container.addEventListener('mousedown', () => { autoRotate = false; });
   container.addEventListener('wheel', () => { autoRotate = false; });
 
-  // ── Render loop ─────────────────────────────────────────────────────
+  // Render loop
   let lastTime = performance.now();
   let frameCount = 0;
 
   function animate(now: number) {
     requestAnimationFrame(animate);
 
-    const dt = Math.min((now - lastTime) / 1000, 0.1);
+    const dt = Math.min((now - lastTime) / 1000, 0.1); // cap dt
     lastTime = now;
     frameCount++;
 
-    // Globe rotation
+    // Globe auto-rotation
     if (autoRotate) {
-      globeAngle += dt * 0.03; // slow spin
-      globe.rotation.y = globeAngle;
-      atmosphereGroup.rotation.y = globeAngle;
+      globe.rotation.y += ROTATION_SPEED * (now - lastTime + dt * 1000);
     }
 
-    // Camera
     camera.update(dt);
-
-    // Weather data update (interpolation)
     weather.update(dt);
-
-    // Clouds
     clouds.update(dt, camera);
 
-    // Wind particles (every other frame for perf)
+    // Only update wind every other frame (perf)
     if (frameCount % 2 === 0) {
       wind.update(dt * 2, camera);
     }
 
-    // Weather overlay
-    weatherOverlay.update(dt);
-
-    // Atmosphere uniforms
+    // Update atmosphere uniforms
     for (const mat of atmosphereMaterials) {
       if (mat.uniforms.uCameraPosition) {
         mat.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
       }
     }
 
-    // Globe lighting
+    // Update globe lighting (slowly rotating sun)
     const hourOfDay = (Date.now() / 3600000) % 24;
     globeLighting.updateTime(hourOfDay);
     globeLighting.updateCameraPosition(camera.threeCamera.position);
 
-    // Cloud shadows
-    cloudShadow.update(dt, globeLighting.getSunDirection());
-
-    // Render
     renderer.render(scene, camera.threeCamera);
   }
 
-  // ── Start ───────────────────────────────────────────────────────────
-  await Promise.all([weather.loadInitial(), globeLoaded]);
+  // Kick off
+  await weather.loadInitial();
   animate(performance.now());
 
-  // ── Resize ──────────────────────────────────────────────────────────
+  // Resize handling
   window.addEventListener('resize', () => {
     const w = window.innerWidth;
     const h = window.innerHeight;
     renderer.setSize(w, h);
     camera.threeCamera.aspect = w / h;
     camera.threeCamera.updateProjectionMatrix();
-    clouds.onResize();
   });
 }
 
