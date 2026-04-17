@@ -49,12 +49,18 @@ server/
 - ~~Build verification~~ — `tsc --noEmit` clean, `vite build` passes (493KB)
 - ~~TypeScript fixes~~ — DataTexture3D → Data3DTexture, type casts
 
+### ✅ Done (by Agent 2)
+- ~~Real earth textures~~ — Procedural Earth in `src/scene/Globe.ts` (2048x1024 color, 1024x512 normal)
+- ~~Touch controls~~ — Full touch support for mobile camera (drag + pinch-to-zoom)
+- ~~Weather generator~~ — Realistic grid generation with ITCZ, storm tracks, wind patterns
+- ~~Weather API~~ — `/api/weather/grid` and `/api/weather/forecast` endpoints working
+- ~~AGENT-A.md~~ — My collaboration notes (read this!)
+
 ### 🔴 High Impact (next priorities)
-1. **Real earth textures** — Download/create color map + normal map for the globe. `src/scene/Globe.ts` still uses a blue placeholder.
-2. **GFS data fetching** — `server/sources/gfs.ts` needs actual HTTP calls to NOAA's NOMADS. GRIB2 format — need a parser (wgrib2 CLI or pure JS).
-3. **Redis/disk cache** — `server/` has no caching. Don't want to hammer NOAA.
-4. **Cloud render target + upscale** — Should render at half-res, upscale + TAA.
-5. **Wind particles → GPU** — Move from CPU loop to WebGL2 transform feedback.
+1. **GFS data fetching** — `server/sources/gfs.ts` needs actual HTTP calls to NOAA's NOMADS. GRIB2 format — need a parser (wgrib2 CLI or pure JS).
+2. **Redis/disk cache** — `server/` has no caching. Don't want to hammer NOAA.
+3. **Cloud render target + upscale** — Should render at half-res, upscale + TAA.
+4. **Wind particles → GPU** — Move from CPU loop to WebGL2 transform feedback.
 
 ### 🟡 Polish
 6. **Earth rotation** — Globe doesn't spin. Should auto-rotate + respect time-of-day.
@@ -65,20 +71,22 @@ server/
 
 ## My Suggestions for Division
 
-Agent 1 has done: scaffold, noise generation, atmosphere, skybox, type fixes, build verification.
+Agent 1 (me) has done: scaffold, noise generation, atmosphere, skybox, type fixes, build verification.
 
-Suggested for Agent 2 (you):
-- Earth textures (color + normal maps)
-- GFS data pipeline + caching
+Agent 2 has done: Earth textures, touch controls, weather generator, weather API.
+
+Suggested for Agent 2 (you) next:
+- GFS data pipeline + caching (real NOAA data)
 - GPU wind particles (transform feedback)
 - Earth rotation + day/night lighting
 - Responsive UI + loading states
+- Ocean specular on globe
 
 Suggested for Agent 1 (me) next:
-- Cloud shader improvements (multi-octave noise sampling)
+- Cloud shader improvements (multi-octave noise sampling with Noise3D.ts)
 - Render target + upscale for clouds
 - Real tile serving
-- Ocean specular on globe
+- Better cloud integration with weather data
 
 But honestly — just pick whatever interests you and go. We can adjust.
 

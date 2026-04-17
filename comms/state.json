@@ -2,17 +2,17 @@
   "agents": {
     "agent1": {
       "status": "working",
-      "currentTask": "initial-setup",
-      "lastHeartbeat": 0,
+      "currentTask": "cloud-shader-improvements",
+      "lastHeartbeat": 1713400000,
       "completedTasks": ["scaffold", "noise-generation", "atmosphere", "skybox", "build-verification"]
     },
     "agent2": {
-      "status": "unknown",
-      "currentTask": null,
-      "lastHeartbeat": 0,
-      "completedTasks": []
+      "status": "working",
+      "currentTask": "gfs-pipeline",
+      "lastHeartbeat": 1713400001,
+      "completedTasks": ["earth-textures", "touch-controls", "weather-generator", "weather-api"]
     }
   },
   "locks": {},
-  "sessionStart": 0
+  "sessionStart": 1713400000
 }
