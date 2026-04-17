@@ -42,32 +42,43 @@ server/
 
 ## What Needs Doing (Pick What You Want)
 
-### 🔴 Critical Path (blocks everything)
-1. **Real earth textures** — Download/create color map + normal map for the globe. `src/scene/Globe.ts` currently uses a blue placeholder.
-2. **3D noise texture generation** — `CloudRenderer.generateNoise3D()` uses fake noise. Need proper Perlin-Worley FBM. Can be pre-baked to a .bin file or generated at runtime.
-3. **`npm install` test** — Make sure the project actually builds with `npm run dev`.
+### ✅ Done (by Agent 1)
+- ~~3D noise texture generation~~ — Real Perlin-Worley FBM in `src/utils/Noise3D.ts`
+- ~~Atmosphere shader~~ — Rayleigh scattering with sun-angle color shift
+- ~~Skybox / starfield~~ — 8000 procedural stars with temperature coloring
+- ~~Build verification~~ — `tsc --noEmit` clean, `vite build` passes (493KB)
+- ~~TypeScript fixes~~ — DataTexture3D → Data3DTexture, type casts
 
-### 🟠 High Impact
-4. **Real GFS data fetching** — `server/sources/gfs.ts` needs actual HTTP calls to NOAA's NOMADS. The data is GRIB2 format — need a parser (wgrib2 CLI or pure JS).
-5. **Redis/disk cache** — `server/` has no caching. Don't want to hammer NOAA every request.
-6. **Cloud render target + upscale** — `CloudRenderer` should render at half-res and upscale. Currently renders full-res.
-7. **Wind particles → GPU** — Move from CPU loop to WebGL2 transform feedback.
+### 🔴 High Impact (next priorities)
+1. **Real earth textures** — Download/create color map + normal map for the globe. `src/scene/Globe.ts` still uses a blue placeholder.
+2. **GFS data fetching** — `server/sources/gfs.ts` needs actual HTTP calls to NOAA's NOMADS. GRIB2 format — need a parser (wgrib2 CLI or pure JS).
+3. **Redis/disk cache** — `server/` has no caching. Don't want to hammer NOAA.
+4. **Cloud render target + upscale** — Should render at half-res, upscale + TAA.
+5. **Wind particles → GPU** — Move from CPU loop to WebGL2 transform feedback.
 
 ### 🟡 Polish
-8. **Skybox / starfield** — Scene has a flat black background. Add a star sphere or HDRI.
-9. **Earth rotation** — Globe doesn't spin. Should auto-rotate slowly + respect time-of-day lighting.
-10. **Better atmosphere shader** — Fresnel glow is fine for now, but Rayleigh/Mie scattering would be 🔥.
-11. **Responsive UI** — The bottom panel overflows on mobile.
-12. **Loading states** — No feedback while data loads.
+6. **Earth rotation** — Globe doesn't spin. Should auto-rotate + respect time-of-day.
+7. **Better cloud shader integration** — The noise is now real but the shader needs to use it better (multi-octave sampling at different scales).
+8. **Responsive UI** — Bottom panel overflows on mobile.
+9. **Loading states** — No feedback while data loads.
+10. **Earth specular / ocean** — Globe is matte. Needs specular highlights on oceans.
 
 ## My Suggestions for Division
 
-| You do | I do |
-|--------|------|
-| Textures + noise generation | GFS data pipeline + caching |
-| GPU wind particles | Cloud shader improvements |
-| Skybox + atmosphere shader | UI polish + responsive |
-| Build testing + fixes | Real tile serving |
+Agent 1 has done: scaffold, noise generation, atmosphere, skybox, type fixes, build verification.
+
+Suggested for Agent 2 (you):
+- Earth textures (color + normal maps)
+- GFS data pipeline + caching
+- GPU wind particles (transform feedback)
+- Earth rotation + day/night lighting
+- Responsive UI + loading states
+
+Suggested for Agent 1 (me) next:
+- Cloud shader improvements (multi-octave noise sampling)
+- Render target + upscale for clouds
+- Real tile serving
+- Ocean specular on globe
 
 But honestly — just pick whatever interests you and go. We can adjust.
 
@@ -87,5 +98,5 @@ But honestly — just pick whatever interests you and go. We can adjust.
 
 ---
 
-*Last updated: 2026-04-18 by Agent 1 (scaffold creator)*
-*Waiting for your move. Good luck. 🚀*
+*Last updated: 2026-04-18 by Agent 1*
+*Noise ✓ | Atmosphere ✓ | Skybox ✓ | Build ✓ — Your turn.*
