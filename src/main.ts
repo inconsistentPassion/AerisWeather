@@ -1,103 +1,59 @@
 /**
  * AerisWeather — Main Entry Point
  * "Windy meets MSFS, but in the browser."
+ *
+ * Architecture:
+ *   MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere (built-in)
+ *   Three.js        → volumetric clouds (custom layer, shared GL context)
+ *   WeatherManager  → data pipeline (shared between both)
  */
 
-import { createScene } from './scene/Scene';
-import { createGlobe } from './scene/Globe';
-import { createAtmosphere } from './scene/Atmosphere';
-import { createCamera } from './scene/Camera';
-import { createSkybox } from './scene/Skybox';
-import { GlobeLighting } from './scene/GlobeLighting';
-import { CloudShadow } from './scene/CloudShadow';
-import { WeatherManager } from './weather/WeatherManager';
-import { WeatherOverlay } from './weather/WeatherOverlay';
-import { CloudRenderer } from './clouds/CloudRenderer';
-import { WindParticles } from './wind/WindParticles';
+import { createMapGlobe } from './scene/MapGlobe';
 import { createUI } from './ui/UI';
-import * as THREE from 'three';
 
 async function init() {
   const container = document.getElementById('app')!;
   const uiContainer = document.getElementById('ui-overlay')!;
 
-  // Core scene
-  const { renderer, scene } = createScene(container);
+  // ── MapLibre globe + Three.js cloud overlay ────────────────────────
+  const globe = createMapGlobe(container);
+  const { map, weather } = globe;
 
-  // Starfield skybox
-  const stars = createSkybox();
-  scene.add(stars);
+  // ── Wait for map to load ───────────────────────────────────────────
+  await globe.ready;
 
-  // Globe (procedural Earth with recognizable continents)
-  const globe = createGlobe();
-  scene.add(globe);
+  // ── Load weather data ──────────────────────────────────────────────
+  await weather.loadInitial();
 
-  // Globe lighting (day/night)
-  const globeLighting = new GlobeLighting(scene, globe);
-
-  // Atmosphere
-  const atmosphereGroup = createAtmosphere();
-  scene.add(atmosphereGroup);
-
-  const atmosphereMaterials: THREE.ShaderMaterial[] = [];
-  atmosphereGroup.traverse((child) => {
-    if (child instanceof THREE.Mesh && child.material instanceof THREE.ShaderMaterial) {
-      atmosphereMaterials.push(child.material);
-    }
-  });
-
-  // Camera
-  const camera = createCamera(container);
-
-  // Weather data
-  const weather = new WeatherManager();
-
-  // Clouds — child of globe so they rotate with earth
-  const clouds = new CloudRenderer(globe, weather);
-  clouds.setVisible(true);
-
-  // Cloud shadows — child of globe
-  const cloudShadow = new CloudShadow(globe, globe, weather);
-
-  // Weather overlays — child of globe
-  const weatherOverlay = new WeatherOverlay(globe, weather);
-
-  // Wind particles — child of globe
-  const wind = new WindParticles(globe, weather);
-
-  // ── UI with proper layer toggle wiring ──────────────────────────────
+  // ── UI ─────────────────────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
     onTimeChange: (t) => weather.setTime(t),
     onLevelChange: (l) => weather.setLevel(l),
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
 
-      // Actually update visuals!
-      switch (layer) {
-        case 'clouds':
-          clouds.setVisible(active);
-          cloudShadow.getMesh().visible = active;
-          break;
-        case 'wind':
-          wind.setVisible(active);
-          break;
-        case 'temperature':
-          weatherOverlay.setVisible('temperature', active);
-          break;
-        case 'pressure':
-          weatherOverlay.setVisible('pressure', active);
-          break;
-        case 'humidity':
-          weatherOverlay.setVisible('humidity', active);
-          break;
+      // Toggle cloud layer visibility in MapLibre
+      if (layer === 'clouds') {
+        try {
+          if (active) {
+            map.setLayoutProperty('three-clouds', 'visibility', 'visible');
+          } else {
+            map.setLayoutProperty('three-clouds', 'visibility', 'none');
+          }
+        } catch { /* layer may not exist yet */ }
       }
     },
-    onCameraMode: (mode) => camera.setMode(mode),
+    onCameraMode: (mode) => {
+      if (mode === 'orbit') {
+        map.easeTo({ pitch: 49, bearing: -20, duration: 1000 });
+      } else if (mode === 'freeflight') {
+        map.easeTo({ pitch: 75, bearing: map.getBearing(), duration: 1000 });
+      }
+    },
   });
 
-  // ── Globe auto-rotation ─────────────────────────────────────────────
-  let autoRotate = true;
-  let globeAngle = 0;
+  // ── Keyboard shortcuts ─────────────────────────────────────────────
+  let autoRotate = false;
 
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
@@ -106,9 +62,7 @@ async function init() {
         autoRotate = !autoRotate;
         break;
       case 'KeyR':
-        camera.setMode('orbit');
-        globeAngle = 0;
-        globe.rotation.y = 0;
+        map.flyTo({ center: [0, 20], zoom: 2.5, pitch: 49, bearing: -20, duration: 1500 });
         break;
       case 'Digit1':
         document.getElementById('btn-wind')?.click();
@@ -125,81 +79,29 @@ async function init() {
       case 'Digit5':
         document.getElementById('btn-humidity')?.click();
         break;
+      case 'Equal':
+      case 'NumpadAdd':
+        map.zoomIn();
+        break;
+      case 'Minus':
+      case 'NumpadSubtract':
+        map.zoomOut();
+        break;
     }
   });
 
-  container.addEventListener('mousedown', () => { autoRotate = false; });
-  container.addEventListener('wheel', () => { autoRotate = false; });
-
-  // ── Render loop ─────────────────────────────────────────────────────
-  let lastTime = performance.now();
-  let frameCount = 0;
-
-  function animate(now: number) {
-    requestAnimationFrame(animate);
-
-    const dt = Math.min((now - lastTime) / 1000, 0.1);
-    lastTime = now;
-    frameCount++;
-
-    // Globe rotation
+  // ── Auto-rotation ──────────────────────────────────────────────────
+  function autoRotateTick() {
     if (autoRotate) {
-      globeAngle += dt * 0.03; // slow spin
-      globe.rotation.y = globeAngle;
-      atmosphereGroup.rotation.y = globeAngle;
-      // clouds, wind, weatherOverlay, cloudShadow are now children of globe
-      // so they rotate automatically — no manual sync needed
+      map.setBearing(map.getBearing() + 0.1);
     }
-
-    // Camera
-    camera.update(dt);
-
-    // Weather data update (interpolation)
-    weather.update(dt);
-
-    // Clouds
-    clouds.update(dt, camera);
-
-    // Wind particles (every other frame for perf)
-    if (frameCount % 2 === 0) {
-      wind.update(dt * 2, camera);
-    }
-
-    // Weather overlay
-    weatherOverlay.update(dt);
-
-    // Atmosphere uniforms
-    for (const mat of atmosphereMaterials) {
-      if (mat.uniforms.uCameraPosition) {
-        mat.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
-      }
-    }
-
-    // Globe lighting
-    const hourOfDay = (Date.now() / 3600000) % 24;
-    globeLighting.updateTime(hourOfDay);
-    globeLighting.updateCameraPosition(camera.threeCamera.position);
-
-    // Cloud shadows
-    cloudShadow.update(dt, globeLighting.getSunDirection());
-
-    // Render
-    renderer.render(scene, camera.threeCamera);
+    requestAnimationFrame(autoRotateTick);
   }
+  autoRotateTick();
 
-  // ── Start ───────────────────────────────────────────────────────────
-  await weather.loadInitial();
-  animate(performance.now());
-
-  // ── Resize ──────────────────────────────────────────────────────────
-  window.addEventListener('resize', () => {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    renderer.setSize(w, h);
-    camera.threeCamera.aspect = w / h;
-    camera.threeCamera.updateProjectionMatrix();
-    clouds.onResize();
-  });
+  // Stop auto-rotate on user interaction
+  map.on('mousedown', () => { autoRotate = false; });
+  map.on('touchstart', () => { autoRotate = false; });
 }
 
 init().catch(console.error);
