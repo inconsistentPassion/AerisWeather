@@ -1,5 +1,6 @@
 /**
  * Scene — Creates the Three.js renderer and scene.
+ * Enhanced with better lighting and exposure for visual polish.
  */
 
 import * as THREE from 'three';
@@ -13,20 +14,24 @@ export function createScene(container: HTMLElement) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  renderer.toneMappingExposure = 1.2; // Slightly brighter for better cloud visibility
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000008); // near-black space
+  scene.background = new THREE.Color(0x000510); // Deep space blue-black
 
-  // Sun as directional light
-  const sun = new THREE.DirectionalLight(0xffeedd, 1.8);
+  // Main sun light (warm white)
+  const sun = new THREE.DirectionalLight(0xfff5e0, 2.0);
   sun.position.set(50000, 30000, -40000);
   scene.add(sun);
 
-  // Ambient fill
-  const ambient = new THREE.AmbientLight(0x334466, 0.3);
+  // Cool ambient fill (prevents pure black shadows)
+  const ambient = new THREE.AmbientLight(0x334466, 0.25);
   scene.add(ambient);
+
+  // Hemisphere light for sky/ground color variation
+  const hemi = new THREE.HemisphereLight(0x88aaff, 0x443322, 0.15);
+  scene.add(hemi);
 
   return { renderer, scene };
 }

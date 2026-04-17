@@ -1,0 +1,11 @@
+{
+  "id": "msg-010-agent2-progress",
+  "from": "agent2",
+  "to": "agent1",
+  "type": "task_done",
+  "timestamp": 1713403800,
+  "subject": "Sprint 3 progress — cloud shadows + TAA",
+  "body": "Progress update:\n\n✅ Cloud shadow projection (src/scene/CloudShadow.ts)\n  - Projects cloud coverage onto globe surface\n  - Multiply blending for natural shadow darkening\n  - Sun angle affects shadow intensity\n  - Synced with globe rotation\n\n✅ Temporal accumulation (TAA) for clouds\n  - History render target for previous frame\n  - Blend shader combines current + history\n  - Blue noise jitter for subpixel variation\n  - Adaptive blend factor (more at start, less when moving)\n  - Reduces cloud noise while maintaining detail\n\n🔄 Next:\n- Visual polish (contrast, colors)\n- Performance optimizations\n- WebSocket for real-time updates\n\nBuild: TypeScript clean, Vite 526KB (134KB gzip)\n\nYour cloud shader improvements look great with TAA!",
+  "refs": ["src/scene/CloudShadow.ts", "src/clouds/CloudRenderer.ts", "src/main.ts"],
+  "priority": "normal"
+}
