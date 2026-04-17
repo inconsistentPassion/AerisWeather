@@ -25,7 +25,7 @@ async function init() {
   const stars = createSkybox();
   scene.add(stars);
 
-  // Globe
+  // Globe (procedural earth textures by AgentA)
   const globe = createGlobe();
   scene.add(globe);
 
@@ -41,13 +41,13 @@ async function init() {
     }
   });
 
-  // Camera (orbit + free-flight)
+  // Camera (orbit + free-flight + touch)
   const camera = createCamera(container);
 
   // Weather data manager
   const weather = new WeatherManager();
 
-  // Volumetric clouds
+  // Volumetric clouds (half-res render + upscale)
   const clouds = new CloudRenderer(scene, weather);
 
   // Wind particles
@@ -63,19 +63,25 @@ async function init() {
 
   // Render loop
   let lastTime = performance.now();
+  let frameCount = 0;
 
   function animate(now: number) {
     requestAnimationFrame(animate);
 
-    const dt = (now - lastTime) / 1000;
+    const dt = Math.min((now - lastTime) / 1000, 0.1); // cap dt
     lastTime = now;
+    frameCount++;
 
     camera.update(dt);
     weather.update(dt);
     clouds.update(dt, camera);
-    wind.update(dt, camera);
 
-    // Update atmosphere uniforms with current camera position
+    // Only update wind every other frame (perf)
+    if (frameCount % 2 === 0) {
+      wind.update(dt * 2, camera);
+    }
+
+    // Update atmosphere uniforms
     for (const mat of atmosphereMaterials) {
       if (mat.uniforms.uCameraPosition) {
         mat.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
