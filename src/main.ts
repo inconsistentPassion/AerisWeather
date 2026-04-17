@@ -10,6 +10,7 @@ import { createCamera } from './scene/Camera';
 import { createSkybox } from './scene/Skybox';
 import { GlobeLighting } from './scene/GlobeLighting';
 import { WeatherManager } from './weather/WeatherManager';
+import { WeatherOverlay } from './weather/WeatherOverlay';
 import { CloudRenderer } from './clouds/CloudRenderer';
 import { WindParticles } from './wind/WindParticles';
 import { createUI } from './ui/UI';
@@ -53,6 +54,9 @@ async function init() {
 
   // Volumetric clouds (half-res render + upscale)
   const clouds = new CloudRenderer(scene, weather);
+
+  // Weather data overlays (temperature, pressure, humidity)
+  const weatherOverlay = new WeatherOverlay(scene, weather);
 
   // Wind particles
   const wind = new WindParticles(scene, weather);
