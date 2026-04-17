@@ -1,7 +1,6 @@
 /**
  * UI — Time slider, level selector, layer toggles, camera mode.
- * 
- * v2: Responsive layout, loading indicator, FPS counter, better styling.
+ * Responsive design with mobile support.
  */
 
 import type { WeatherManager } from '../weather/WeatherManager';
@@ -18,45 +17,41 @@ interface UIActions {
 export function createUI(container: HTMLElement, weather: WeatherManager, actions: UIActions) {
   container.innerHTML = `
     <div class="aeris-ui">
-      <!-- Loading overlay -->
-      <div class="loading-overlay" id="loading-overlay">
-        <div class="loading-spinner"></div>
-        <span>Loading weather data...</span>
-      </div>
-
-      <!-- Top bar: title + FPS -->
-      <div class="top-bar">
-        <div class="title">
-          <span class="title-icon">🌍</span>
-          <span class="title-text">AerisWeather</span>
-        </div>
+      <!-- Header -->
+      <div class="ui-header">
+        <div class="logo">⛅ AerisWeather</div>
         <div class="fps-counter" id="fps-counter">-- FPS</div>
       </div>
 
-      <!-- Bottom controls -->
-      <div class="bottom-controls">
-        <div class="ui-panel time-panel">
-          <label>Forecast</label>
+      <!-- Main controls panel -->
+      <div class="ui-panel main-panel">
+        <!-- Time control -->
+        <div class="control-group">
+          <label>⏱ Time</label>
           <div class="time-row">
-            <input type="range" id="time-slider" min="0" max="72" value="0" step="3" />
-            <span id="time-display" class="time-value">Now</span>
+            <button id="btn-play" class="icon-btn" title="Play/Pause (Space)">▶</button>
+            <input type="range" id="time-slider" min="0" max="120" value="0" step="1" />
+            <span id="time-display" class="time-label">Now</span>
           </div>
         </div>
 
-        <div class="ui-panel level-panel">
-          <label>Level</label>
+        <!-- Level selector -->
+        <div class="control-group">
+          <label>📊 Level</label>
           <div class="level-buttons">
             <button class="level-btn active" data-level="surface">SFC</button>
+            <button class="level-btn" data-level="925hPa">925</button>
             <button class="level-btn" data-level="850hPa">850</button>
+            <button class="level-btn" data-level="700hPa">700</button>
             <button class="level-btn" data-level="500hPa">500</button>
-            <button class="level-btn" data-level="FL100">FL100</button>
-            <button class="level-btn" data-level="FL200">FL200</button>
-            <button class="level-btn" data-level="FL300">FL300</button>
+            <button class="level-btn" data-level="300hPa">300</button>
+            <button class="level-btn" data-level="FL300">FL350</button>
           </div>
         </div>
 
-        <div class="ui-panel layers-panel">
-          <label>Layers</label>
+        <!-- Layer toggles -->
+        <div class="control-group">
+          <label>🗺 Layers</label>
           <div class="layer-toggles">
             <button class="layer-btn active" data-layer="wind">💨 Wind</button>
             <button class="layer-btn active" data-layer="clouds">☁️ Clouds</button>
@@ -66,258 +61,274 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
           </div>
         </div>
 
-        <div class="ui-panel camera-panel">
-          <label>Camera</label>
+        <!-- Camera mode -->
+        <div class="control-group">
+          <label>📷 Camera</label>
           <div class="camera-buttons">
             <button class="cam-btn active" data-mode="orbit">🌍 Orbit</button>
-            <button class="cam-btn" data-mode="freeflight">✈️ Free</button>
+            <button class="cam-btn" data-mode="freeflight">✈️ Free Flight</button>
           </div>
         </div>
+      </div>
 
-        <!-- Legend (shown when weather layer active) -->
-        <div class="ui-panel legend-panel hidden" id="legend-panel">
-          <label id="legend-title">Temperature</label>
-          <div class="legend-bar" id="legend-bar"></div>
-          <div class="legend-labels">
-            <span id="legend-min">-40°C</span>
-            <span id="legend-max">40°C</span>
-          </div>
-        </div>
+      <!-- Info bar -->
+      <div class="ui-info-bar">
+        <span id="cursor-info">Hover globe for details</span>
+        <span id="data-source">Procedural Data</span>
       </div>
     </div>
   `;
 
-  // Inject styles
+  // Inject responsive styles
   const style = document.createElement('style');
   style.textContent = `
     .aeris-ui {
-      pointer-events: none;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, -sans-serif;
-      color: #e0e8f0;
-      font-size: 13px;
       position: absolute;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      color: #e0e8f0;
+      pointer-events: none;
     }
     .aeris-ui > * { pointer-events: auto; }
 
-    /* Loading overlay */
-    .loading-overlay {
+    /* Header */
+    .ui-header {
       position: absolute;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      background: rgba(0, 5, 15, 0.85);
-      z-index: 100;
-      transition: opacity 0.5s;
-      gap: 16px;
-      font-size: 16px;
-      color: #8ab4e8;
-    }
-    .loading-overlay.hidden {
-      opacity: 0;
-      pointer-events: none;
-    }
-    .loading-spinner {
-      width: 40px;
-      height: 40px;
-      border: 3px solid rgba(100, 160, 255, 0.2);
-      border-top-color: #4a90d9;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* Top bar */
-    .top-bar {
+      top: 0;
+      left: 0;
+      right: 0;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 12px 16px;
+      padding: 12px 20px;
+      background: linear-gradient(180deg, rgba(0, 5, 16, 0.85) 0%, transparent 100%);
       pointer-events: none;
     }
-    .title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .ui-header > * { pointer-events: auto; }
+    .logo {
       font-size: 18px;
       font-weight: 600;
       letter-spacing: -0.3px;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.5);
-    }
-    .title-icon { font-size: 22px; }
-    .title-text {
-      background: linear-gradient(135deg, #8ab4e8, #c0d8f8);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      text-shadow: 0 0 20px rgba(100, 180, 255, 0.3);
     }
     .fps-counter {
       font-size: 11px;
-      font-family: 'SF Mono', 'Cascadia Code', monospace;
-      color: rgba(160, 190, 230, 0.5);
-      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      color: #556677;
+      font-variant-numeric: tabular-nums;
+      background: rgba(0, 5, 16, 0.5);
+      padding: 4px 8px;
+      border-radius: 4px;
     }
 
-    /* Bottom controls */
-    .bottom-controls {
-      display: flex;
-      gap: 8px;
-      padding: 12px 16px;
-      background: linear-gradient(transparent 0%, rgba(0,5,15,0.75) 30%);
-      flex-wrap: wrap;
-      align-items: flex-end;
-      margin-top: auto;
-    }
-    .ui-panel {
-      background: rgba(10, 20, 40, 0.8);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
+    /* Main panel */
+    .main-panel {
+      margin: 0 16px 16px;
+      background: rgba(10, 20, 40, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
       border: 1px solid rgba(100, 140, 200, 0.15);
-      border-radius: 8px;
-      padding: 8px 12px;
+      border-radius: 12px;
+      padding: 14px 18px;
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+      align-items: flex-start;
     }
-    .ui-panel label {
-      display: block;
-      font-size: 9px;
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .control-group label {
+      font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 1.5px;
       color: rgba(160, 190, 230, 0.5);
-      margin-bottom: 4px;
     }
 
-    /* Time slider */
+    /* Time control */
     .time-row {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    #time-slider {
-      width: 160px;
-      accent-color: #4a90d9;
-      height: 4px;
-    }
-    .time-value {
-      font-variant-numeric: tabular-nums;
+    .icon-btn {
+      background: rgba(70, 130, 220, 0.3);
+      border: 1px solid rgba(100, 160, 255, 0.3);
       color: #8ab4e8;
-      font-size: 12px;
-      min-width: 40px;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .icon-btn:hover {
+      background: rgba(70, 130, 220, 0.5);
+      color: #fff;
+    }
+    #time-slider {
+      width: 180px;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 2px;
+      outline: none;
+    }
+    #time-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #6ab0ff;
+      cursor: pointer;
+      box-shadow: 0 0 8px rgba(60, 140, 255, 0.4);
+    }
+    .time-label {
+      font-size: 13px;
+      color: #8899aa;
+      min-width: 45px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
     }
 
     /* Buttons */
     .level-buttons, .layer-toggles, .camera-buttons {
       display: flex;
-      gap: 3px;
+      gap: 4px;
       flex-wrap: wrap;
     }
     .level-btn, .layer-btn, .cam-btn {
       background: rgba(40, 60, 100, 0.4);
       border: 1px solid rgba(80, 120, 180, 0.2);
-      border-radius: 4px;
-      color: #a0c0e0;
-      padding: 4px 8px;
+      border-radius: 6px;
+      color: #8899aa;
+      padding: 6px 12px;
       cursor: pointer;
-      font-size: 11px;
+      font-size: 12px;
       transition: all 0.15s;
-      white-space: nowrap;
     }
     .level-btn:hover, .layer-btn:hover, .cam-btn:hover {
       background: rgba(60, 90, 150, 0.5);
-      border-color: rgba(100, 150, 220, 0.3);
+      color: #c0d0e0;
     }
     .level-btn.active, .cam-btn.active {
-      background: rgba(70, 130, 220, 0.5);
+      background: rgba(70, 130, 220, 0.4);
       border-color: rgba(100, 160, 255, 0.4);
       color: #fff;
     }
     .layer-btn.active {
-      background: rgba(60, 160, 100, 0.4);
+      background: rgba(60, 160, 100, 0.35);
       border-color: rgba(80, 200, 120, 0.3);
-      color: #c0ffe0;
+      color: #b0e8c8;
     }
 
-    /* Responsive: stack vertically on narrow screens */
-    @media (max-width: 768px) {
-      .bottom-controls {
-        flex-direction: column;
-        gap: 6px;
-        padding: 8px 12px;
-      }
-      .ui-panel { padding: 6px 10px; }
-      #time-slider { width: 100%; }
-      .time-row { width: 100%; }
-      .level-buttons, .layer-toggles, .camera-buttons {
-        width: 100%;
-        justify-content: flex-start;
-      }
-    }
-
-    @media (max-width: 480px) {
-      .title { font-size: 14px; }
-      .title-icon { font-size: 18px; }
-      .level-btn, .layer-btn, .cam-btn {
-        padding: 3px 6px;
-        font-size: 10px;
-      }
-    }
-
-    /* Legend */
-    .legend-panel {
-      min-width: 120px;
-    }
-    .legend-panel.hidden { display: none; }
-    .legend-bar {
-      height: 12px;
-      border-radius: 3px;
-      margin: 4px 0 2px;
-    }
-    .legend-labels {
+    /* Info bar */
+    .ui-info-bar {
       display: flex;
       justify-content: space-between;
-      font-size: 10px;
-      color: rgba(160, 190, 230, 0.6);
+      padding: 8px 20px;
+      font-size: 11px;
+      color: #445566;
+    }
+
+    /* ── Responsive: Tablet ── */
+    @media (max-width: 768px) {
+      .main-panel {
+        margin: 0 8px 8px;
+        padding: 10px 12px;
+        gap: 12px;
+      }
+      #time-slider { width: 120px; }
+      .level-btn, .layer-btn, .cam-btn {
+        padding: 5px 8px;
+        font-size: 11px;
+      }
+    }
+
+    /* ── Responsive: Mobile ── */
+    @media (max-width: 480px) {
+      .ui-header { padding: 8px 12px; }
+      .logo { font-size: 15px; }
+      .main-panel {
+        flex-direction: column;
+        gap: 10px;
+        margin: 0 4px 4px;
+        padding: 10px;
+        border-radius: 8px;
+      }
+      .control-group { width: 100%; }
+      .time-row { width: 100%; }
+      #time-slider { flex: 1; width: auto; }
+      .level-buttons, .layer-toggles {
+        width: 100%;
+        justify-content: center;
+      }
+      .ui-info-bar { padding: 4px 12px; font-size: 10px; }
+    }
+
+    /* Touch-friendly targets */
+    @media (pointer: coarse) {
+      .level-btn, .layer-btn, .cam-btn {
+        min-height: 44px;
+        min-width: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .icon-btn {
+        width: 44px;
+        height: 44px;
+        font-size: 18px;
+      }
     }
   `;
   document.head.appendChild(style);
 
-  // --- Event wiring ---
+  // ── Event wiring ────────────────────────────────────────────────────
 
-  // Loading overlay
-  const loadingOverlay = container.querySelector('#loading-overlay') as HTMLElement;
-  weather.on('dataLoaded', () => {
-    loadingOverlay.classList.add('hidden');
-  });
-  // Auto-hide after 3s if no data event
-  setTimeout(() => loadingOverlay.classList.add('hidden'), 3000);
+  let playing = false;
+  let playInterval: ReturnType<typeof setInterval> | null = null;
 
-  // FPS counter
-  const fpsCounter = container.querySelector('#fps-counter')!;
-  let frameCount = 0;
-  let lastFpsTime = performance.now();
-  function updateFps() {
-    frameCount++;
-    const now = performance.now();
-    if (now - lastFpsTime >= 1000) {
-      fpsCounter.textContent = `${frameCount} FPS`;
-      frameCount = 0;
-      lastFpsTime = now;
+  // Play button
+  const playBtn = container.querySelector('#btn-play') as HTMLButtonElement;
+  playBtn.addEventListener('click', () => {
+    playing = !playing;
+    playBtn.textContent = playing ? '⏸' : '▶';
+
+    if (playing) {
+      playInterval = setInterval(() => {
+        const val = parseInt(timeSlider.value);
+        timeSlider.value = String(val >= 120 ? 0 : val + 1);
+        updateTimeDisplay();
+      }, 300);
+    } else if (playInterval) {
+      clearInterval(playInterval);
+      playInterval = null;
     }
-    requestAnimationFrame(updateFps);
-  }
-  updateFps();
+  });
 
   // Time slider
   const timeSlider = container.querySelector('#time-slider') as HTMLInputElement;
   const timeDisplay = container.querySelector('#time-display')!;
-  timeSlider.addEventListener('input', () => {
+
+  function updateTimeDisplay() {
     const hours = parseInt(timeSlider.value);
     timeDisplay.textContent = hours === 0 ? 'Now' : `+${hours}h`;
     const now = new Date();
     now.setHours(now.getHours() + hours);
     actions.onTimeChange(now.getTime());
-  });
+  }
+
+  timeSlider.addEventListener('input', updateTimeDisplay);
 
   // Level buttons
   container.querySelectorAll('.level-btn').forEach(btn => {
@@ -328,68 +339,12 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
     });
   });
 
-  // Legend
-  const legendPanel = container.querySelector('#legend-panel') as HTMLElement;
-  const legendTitle = container.querySelector('#legend-title')!;
-  const legendBar = container.querySelector('#legend-bar') as HTMLElement;
-  const legendMin = container.querySelector('#legend-min')!;
-  const legendMax = container.querySelector('#legend-max')!;
-
-  const legendConfig: Record<string, { title: string; gradient: string; min: string; max: string }> = {
-    temperature: {
-      title: 'Temperature',
-      gradient: 'linear-gradient(90deg, #0066cc, #88ccff, #ffffff, #ffcc44, #ff4400)',
-      min: '-40°C',
-      max: '40°C',
-    },
-    pressure: {
-      title: 'Pressure',
-      gradient: 'linear-gradient(90deg, #6633aa, #3366cc, #33cc88, #cccc00)',
-      min: '980 hPa',
-      max: '1040 hPa',
-    },
-    humidity: {
-      title: 'Humidity',
-      gradient: 'linear-gradient(90deg, #886633, #44aa44, #2266aa)',
-      min: '0%',
-      max: '100%',
-    },
-  };
-
-  function updateLegend(layer: string) {
-    const config = legendConfig[layer];
-    if (config) {
-      legendPanel.classList.remove('hidden');
-      legendTitle.textContent = config.title;
-      legendBar.style.background = config.gradient;
-      legendMin.textContent = config.min;
-      legendMax.textContent = config.max;
-    }
-  }
-
   // Layer toggles
   container.querySelectorAll('.layer-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const layer = btn.getAttribute('data-layer') as WeatherLayer;
       const isActive = btn.classList.toggle('active');
       actions.onLayerToggle(layer, isActive);
-
-      // Show/hide legend
-      if (isActive && legendConfig[layer]) {
-        updateLegend(layer);
-      } else if (!isActive && legendConfig[layer]) {
-        // Check if any other legend-able layer is active
-        const hasLegendLayer = Array.from(container.querySelectorAll('.layer-btn.active'))
-          .some(b => legendConfig[b.getAttribute('data-layer')!]);
-        if (!hasLegendLayer) {
-          legendPanel.classList.add('hidden');
-        } else {
-          // Show first active legend layer
-          const first = Array.from(container.querySelectorAll('.layer-btn.active'))
-            .find(b => legendConfig[b.getAttribute('data-layer')!]);
-          if (first) updateLegend(first.getAttribute('data-layer')!);
-        }
-      }
     });
   });
 
@@ -401,6 +356,31 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
       actions.onCameraMode(btn.getAttribute('data-mode') as CameraMode);
     });
   });
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.repeat) {
+      e.preventDefault();
+      playBtn.click();
+    }
+  });
+
+  // FPS counter
+  const fpsEl = container.querySelector('#fps-counter')!;
+  let frameCount = 0;
+  let lastFpsTime = performance.now();
+
+  function updateFPS() {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 500) {
+      fpsEl.textContent = `${Math.round(frameCount / ((now - lastFpsTime) / 1000))} FPS`;
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+    requestAnimationFrame(updateFPS);
+  }
+  requestAnimationFrame(updateFPS);
 
   return { container };
 }
