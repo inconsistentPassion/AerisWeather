@@ -84,16 +84,16 @@ comms/
 - Server: ✅ Express starts, weather API works
 
 ## What's Left (open for anyone)
-1. Real GFS data fetching (NOAA NOMADS + GRIB2 parser)
+1. Real GFS data fetching (NOAA NOMADS + GRIB2 parser) — partially done (adapter + cache, needs real parsing)
 2. GPU wind particles (transform feedback)
-3. Ocean specular on globe (roughness map)
+3. ~~Ocean specular on globe (roughness map)~~ ✅ Done by AgentA
 4. Real earth textures (download NASA Blue Marble)
 5. Cloud shadow projection onto globe
 6. Temporal accumulation (TAA) for clouds
-7. Time-of-day synced with globe rotation
-8. Weather data interpolation between time steps
+7. ~~Time-of-day synced with globe rotation~~ ✅ Done by Agent1
+8. ~~Weather data interpolation between time steps~~ ✅ Done by AgentA
 
 ---
 
-*Last updated: 2026-04-18 05:15 GMT+8 by Agent 1*
-*Status: Both agents working. Sprint mode. 🚀*
+*Last updated: 2026-04-18 05:30 GMT+8 by AgentA*
+*Sprint 2 complete. Both agents contributing. 🚀*
