@@ -22,6 +22,14 @@ export class CloudRenderer {
   private cloudMapTexture: THREE.DataTexture | null = null;
   private noiseTexture: THREE.Data3DTexture;
 
+  // Temporal accumulation (TAA)
+  private historyTarget: THREE.WebGLRenderTarget;
+  private blendMaterial: THREE.ShaderMaterial;
+  private blendQuad: THREE.Mesh;
+  private blendScene: THREE.Scene;
+  private blendCamera: THREE.OrthographicCamera;
+  private frameCount: number = 0;
+
   // Fullscreen quad for upscale pass
   private upscaleMaterial: THREE.ShaderMaterial;
   private upscaleQuad: THREE.Mesh;
@@ -81,6 +89,67 @@ export class CloudRenderer {
         stencilBuffer: false,
       }
     );
+
+    // History target for temporal accumulation (TAA)
+    this.historyTarget = new THREE.WebGLRenderTarget(
+      Math.floor(window.innerWidth / 2),
+      Math.floor(window.innerHeight / 2),
+      {
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+      }
+    );
+
+    // Blend shader for TAA
+    this.blendScene = new THREE.Scene();
+    this.blendCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    this.blendMaterial = new THREE.ShaderMaterial({
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uCurrentFrame;
+        uniform sampler2D uHistoryFrame;
+        uniform float uBlendFactor;
+        uniform vec2 uJitter;
+        varying vec2 vUv;
+
+        void main() {
+          vec2 uv = vUv + uJitter;
+
+          vec4 current = texture2D(uCurrentFrame, uv);
+          vec4 history = texture2D(uHistoryFrame, vUv);
+
+          // Blend current with history
+          vec4 result = mix(history, current, uBlendFactor);
+
+          gl_FragColor = result;
+        }
+      `,
+      uniforms: {
+        uCurrentFrame: { value: this.renderTarget.texture },
+        uHistoryFrame: { value: this.historyTarget.texture },
+        uBlendFactor: { value: 0.1 }, // Low = more accumulation, smoother but more ghosting
+        uJitter: { value: new THREE.Vector2(0, 0) },
+      },
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this.blendQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.blendMaterial
+    );
+    this.blendScene.add(this.blendQuad);
 
     // Upscale pass (renders cloud RT to screen with bilinear filtering)
     this.upscaleScene = new THREE.Scene();
@@ -179,8 +248,32 @@ export class CloudRenderer {
     renderer.clear();
     renderer.render(scene, camera);
 
+    // Temporal accumulation: blend current with history
+    // Use blue noise jitter for subpixel variation
+    const jitterX = (Math.random() - 0.5) * 0.5 / this.renderTarget.width;
+    const jitterY = (Math.random() - 0.5) * 0.5 / this.renderTarget.height;
+    this.blendMaterial.uniforms.uJitter.value.set(jitterX, jitterY);
+
+    // Adaptive blend factor: more accumulation at start, less when moving
+    const blendFactor = this.frameCount < 10 ? 0.3 : 0.08;
+    this.blendMaterial.uniforms.uBlendFactor.value = blendFactor;
+    this.frameCount++;
+
+    // Blend current frame with history
+    renderer.setRenderTarget(this.historyTarget);
+    renderer.render(this.blendScene, this.blendCamera);
+
+    // Copy blended result back to render target for next frame
+    // (swap is implicit: historyTarget now has blended result)
+    const temp = this.renderTarget;
+    this.renderTarget = this.historyTarget;
+    this.historyTarget = temp;
+    this.blendMaterial.uniforms.uCurrentFrame.value = this.renderTarget.texture;
+    this.blendMaterial.uniforms.uHistoryFrame.value = this.historyTarget.texture;
+
     // Upscale to screen
     renderer.setRenderTarget(currentRT);
+    this.upscaleMaterial.uniforms.uCloudTex.value = this.renderTarget.texture;
     renderer.render(this.upscaleScene, this.upscaleCamera);
   }
 
@@ -188,6 +281,7 @@ export class CloudRenderer {
     const w = Math.floor(window.innerWidth / 2);
     const h = Math.floor(window.innerHeight / 2);
     this.renderTarget.setSize(w, h);
+    this.historyTarget.setSize(w, h);
     this.upscaleMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
   }
 
