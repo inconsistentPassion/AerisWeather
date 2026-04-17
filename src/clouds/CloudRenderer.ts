@@ -10,8 +10,8 @@
 
 import * as THREE from 'three';
 import type { WeatherManager } from '../weather/WeatherManager';
-import cloudVertexShader from '../shaders/cloud.vert';
-import cloudFragmentShader from '../shaders/cloud.frag';
+import cloudVertexShader from '../shaders/cloud-three.vert';
+import cloudFragmentShader from '../shaders/cloud-three.frag';
 import { generatePerlinWorley3D } from '../utils/Noise3D';
 
 // MapLibre uses meters (WGS84), not km

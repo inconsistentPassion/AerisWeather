@@ -1,9 +1,9 @@
 /**
- * CloudLayer — MapLibre custom layer rendering volumetric clouds.
+ * CloudLayer — MapLibre custom layer rendering Windy-style blue clouds.
  *
  * Pure WebGL2 implementation — no Three.js dependency.
- * Reads MapLibre's native matrices directly for perfect alignment.
- * Earth radius matches MapLibre's WGS84 (6371008.8m).
+ * Fullscreen quad ray-marched against a cloud shell sphere.
+ * Reads MapLibre's native inverse VP matrix for world reconstruction.
  */
 
 import maplibregl from 'maplibre-gl';
@@ -34,6 +34,12 @@ export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLaye
 
       const vertShader = compileShader(gl, gl.VERTEX_SHADER, cloudVertSrc);
       const fragShader = compileShader(gl, gl.FRAGMENT_SHADER, cloudFragSrc);
+
+      if (!vertShader || !fragShader) {
+        console.error('Cloud shader compile failed');
+        return;
+      }
+
       program = gl.createProgram()!;
       gl.attachShader(program, vertShader);
       gl.attachShader(program, fragShader);
@@ -44,14 +50,16 @@ export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLaye
         return;
       }
 
+      // Cache uniform locations
       const names = [
         'uInvVP', 'uCameraPos', 'uPlanetCenter', 'uPlanetRadius',
         'uCloudBaseAlt', 'uCloudTopAlt', 'uTime',
-        'uSunDir', 'uSunColor', 'uDensityMult', 'uCoverageMult',
+        'uCoverageMult', 'uOpacity',
         'uCloudMap', 'uNoiseTex',
       ];
       for (const n of names) uniforms[n] = gl.getUniformLocation(program, n);
 
+      // Fullscreen quad VAO
       vao = gl.createVertexArray()!;
       gl.bindVertexArray(vao);
       const buf = gl.createBuffer();
@@ -64,7 +72,8 @@ export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLaye
       gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
       gl.bindVertexArray(null);
 
-      noiseTexture = createNoiseTexture(gl, 32);
+      // 64³ noise texture — bigger = less banding
+      noiseTexture = createNoiseTexture(gl, 64);
       cloudMapTexture = createCloudCoverageTexture(gl);
 
       weather.on('dataLoaded', () => updateCloudMapTexture(gl, cloudMapTexture, weather));
@@ -101,10 +110,8 @@ export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLaye
       gl.uniform1f(uniforms.uCloudBaseAlt, CLOUD_BASE_ALT);
       gl.uniform1f(uniforms.uCloudTopAlt, CLOUD_TOP_ALT);
       gl.uniform1f(uniforms.uTime, performance.now() * 0.001);
-      gl.uniform3f(uniforms.uSunDir, 0.6, 0.5, -0.4);
-      gl.uniform3f(uniforms.uSunColor, 1.0, 0.95, 0.85);
-      gl.uniform1f(uniforms.uDensityMult, 0.6);
-      gl.uniform1f(uniforms.uCoverageMult, 1.8);
+      gl.uniform1f(uniforms.uCoverageMult, 1.5);
+      gl.uniform1f(uniforms.uOpacity, 0.85);
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, cloudMapTexture);
@@ -129,22 +136,28 @@ export function createCloudLayer(weather: WeatherManager): maplibregl.CustomLaye
   };
 }
 
-function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
+function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader | null {
   const shader = gl.createShader(type)!;
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
     console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
   }
   return shader;
 }
 
 function createNoiseTexture(gl: WebGL2RenderingContext, size: number): WebGLTexture {
   const rawData = generatePerlinWorley3D(size);
+  // Convert to RGBA for compatibility
   const data = new Float32Array(size * size * size * 4);
   for (let i = 0; i < rawData.length; i++) {
     const v = rawData[i];
-    data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 1;
+    data[i * 4] = v;
+    data[i * 4 + 1] = v;
+    data[i * 4 + 2] = v;
+    data[i * 4 + 3] = 1;
   }
   const tex = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_3D, tex);
@@ -164,14 +177,19 @@ function createCloudCoverageTexture(gl: WebGL2RenderingContext): WebGLTexture {
     for (let i = 0; i < w; i++) {
       const idx = (j * w + i) * 4;
       const lat = (j / h - 0.5) * Math.PI;
+      // ITCZ (tropical convergence zone)
       const itcz = Math.exp(-lat * lat * 15) * 0.7;
+      // Mid-latitude storm tracks (~30° and ~60°)
       const storm30 = Math.exp(-Math.pow(Math.abs(lat) - 0.52, 2) * 20) * 0.4;
       const storm60 = Math.exp(-Math.pow(Math.abs(lat) - 1.05, 2) * 15) * 0.3;
+      // Procedural noise
       const nx = i / w * 6, ny = j / h * 6;
       const noise = (Math.sin(nx * 2.1 + ny * 1.7) * 0.5 + 0.5) *
                     (Math.cos(nx * 1.3 - ny * 2.3) * 0.5 + 0.5);
       data[idx] = Math.min(1.0, itcz + storm30 + storm60 + noise * 0.2);
-      data[idx + 1] = 0.7; data[idx + 2] = 0.4; data[idx + 3] = 1;
+      data[idx + 1] = 0.7; // humidity
+      data[idx + 2] = 0.0;
+      data[idx + 3] = 1.0;
     }
   }
   const tex = gl.createTexture()!;
@@ -194,7 +212,8 @@ function updateCloudMapTexture(gl: WebGL2RenderingContext, tex: WebGLTexture, we
       const idx = j * width + i, t = idx * 4;
       data[t] = fields.cloudFraction?.[idx] ?? 0;
       data[t + 1] = fields.humidity?.[idx] ?? 0.5;
-      data[t + 2] = 0.5; data[t + 3] = 1;
+      data[t + 2] = 0.0;
+      data[t + 3] = 1.0;
     }
   }
   gl.bindTexture(gl.TEXTURE_2D, tex);

@@ -1,15 +1,12 @@
-// cloud.vert — Pass world position to fragment shader for ray marching
-uniform vec3 uPlanetCenter;
-uniform float uPlanetRadius;
-uniform float uCloudBase;
-uniform float uCloudTop;
+// cloud.vert — Fullscreen quad for MapLibre custom layer
+// Uses the inverse VP matrix in the fragment shader to reconstruct world rays.
 
-varying vec3 vWorldPosition;
-varying vec3 vObjectPosition;
+#version 300 es
+
+in vec2 aPosition;
+out vec2 vUV;
 
 void main() {
-  vec4 worldPos = modelMatrix * vec4(position, 1.0);
-  vWorldPosition = worldPos.xyz;
-  vObjectPosition = position;
-  gl_Position = projectionMatrix * viewMatrix * worldPos;
+  vUV = aPosition * 0.5 + 0.5;
+  gl_Position = vec4(aPosition, 0.0, 1.0);
 }

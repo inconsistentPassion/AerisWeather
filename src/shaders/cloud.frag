@@ -1,110 +1,31 @@
-// cloud.frag — Ray-marched volumetric clouds
+// cloud.frag — Windy-style blue cloud overlay for MapLibre globe
 //
-// Fixed version: proper density accumulation, simplified noise sampling,
-// correct ray-sphere intersection for planet-scale clouds.
+// Renders cloud coverage as a semi-transparent blue-tinted layer
+// on the globe surface. No volumetric ray-marching — just a clean
+// 2D cloud map with noise detail and blue color grading.
 
-#define PI 3.14159265359
+#version 300 es
+precision highp float;
 
+uniform mat4 uInvVP;
+uniform vec3 uCameraPos;
+uniform vec3 uPlanetCenter;
+uniform float uPlanetRadius;
+uniform float uCloudBaseAlt;
+uniform float uCloudTopAlt;
+uniform float uTime;
+uniform float uCoverageMult;
+uniform float uOpacity;
 uniform sampler2D uCloudMap;
 uniform sampler3D uNoiseTex;
 
-uniform vec3 uPlanetCenter;
-uniform float uPlanetRadius;
-uniform float uCloudBase;
-uniform float uCloudTop;
+in vec2 vUV;
+out vec4 fragColor;
 
-uniform float uTime;
-uniform vec3 uCameraPosition;
-uniform vec3 uSunDirection;
-uniform vec3 uSunColor;
+#define PI 3.14159265359
+#define MAX_STEPS 48
 
-uniform int uMaxSteps;
-uniform int uLightSteps;
-uniform float uDensityMultiplier;
-uniform float uCoverageMultiplier;
-uniform vec2 uWindVelocity;
-
-varying vec3 vWorldPosition;
-
-// Henyey-Greenstein phase function
-float henyeyGreenstein(float cosTheta, float g) {
-  float g2 = g * g;
-  return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
-}
-
-// Dual-lobe phase
-float phase(float cosTheta) {
-  float forward = henyeyGreenstein(cosTheta, 0.7);
-  float back = henyeyGreenstein(cosTheta, -0.35);
-  return mix(back, forward, 0.6);
-}
-
-// World position to lat-lon UV
-vec2 worldToUV(vec3 worldPos) {
-  vec3 rel = normalize(worldPos - uPlanetCenter);
-  float lat = asin(clamp(rel.y, -1.0, 1.0));
-  float lon = atan(rel.z, rel.x);
-  return vec2(
-    (lon / (2.0 * PI)) + 0.5,
-    (lat / PI) + 0.5
-  );
-}
-
-// Sample cloud coverage from weather map
-float sampleCoverage(vec3 worldPos) {
-  vec2 uv = worldToUV(worldPos);
-  float c = texture(uCloudMap, uv).r;
-  return c * uCoverageMultiplier;
-}
-
-// Sample 3D noise with wind animation
-float sampleNoise(vec3 worldPos, float scale) {
-  vec3 uv = worldPos * scale + vec3(
-    uTime * uWindVelocity.x,
-    0.0,
-    uTime * uWindVelocity.y
-  );
-  uv = fract(uv); // tile
-  return texture(uNoiseTex, uv).r;
-}
-
-// Full density at a point
-float getDensity(vec3 worldPos) {
-  vec3 rel = worldPos - uPlanetCenter;
-  float r = length(rel);
-  float altitude = r - uPlanetRadius;
-
-  // Outside cloud shell
-  if (altitude < uCloudBase || altitude > uCloudTop) return 0.0;
-
-  // Height shaping (0 at base, 1 at top of cloud layer)
-  float cloudRange = uCloudTop - uCloudBase;
-  float h = (altitude - uCloudBase) / cloudRange;
-  float heightShape = smoothstep(0.0, 0.2, h) * (1.0 - smoothstep(0.7, 1.0, h));
-
-  // Cloud coverage from weather map
-  float coverage = sampleCoverage(worldPos);
-
-  // 3D noise — two octaves
-  float n1 = sampleNoise(worldPos, 0.0004); // large structure
-  float n2 = sampleNoise(worldPos, 0.002);  // detail
-
-  // Combine
-  float noise = n1 * 0.65 + n2 * 0.35;
-
-  // Density = coverage * height_shape * noise
-  float density = coverage * heightShape * noise;
-
-  // Apply multiplier
-  density *= uDensityMultiplier;
-
-  // Remap to create cloud-like edges (don't kill low values completely)
-  density = smoothstep(0.0, 0.4, density);
-
-  return density;
-}
-
-// Ray-sphere intersection (standard formula)
+// Ray-sphere intersection
 vec2 hitSphere(vec3 ro, vec3 rd, float radius) {
   float b = dot(ro, rd);
   float c = dot(ro, ro) - radius * radius;
@@ -114,87 +35,150 @@ vec2 hitSphere(vec3 ro, vec3 rd, float radius) {
   return vec2(-b - s, -b + s);
 }
 
+// World position → equirectangular UV
+vec2 worldToLatLonUV(vec3 worldPos) {
+  vec3 dir = normalize(worldPos - uPlanetCenter);
+  float lat = asin(clamp(dir.y, -1.0, 1.0));
+  float lon = atan(dir.z, dir.x);
+  return vec2(
+    (lon / (2.0 * PI)) + 0.5,
+    (lat / PI) + 0.5
+  );
+}
+
+// Sample 3D noise with wind drift
+float sampleNoise(vec3 worldPos, float scale) {
+  vec3 p = worldPos * scale;
+  p.x += uTime * 0.00015;
+  p.z += uTime * 0.0001;
+  p = fract(p);
+  return texture(uNoiseTex, p).r;
+}
+
+// Henyey-Greenstein phase
+float phase(float cosTheta, float g) {
+  float g2 = g * g;
+  return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+}
+
 void main() {
-  // ro = camera position relative to planet center (both in world space)
-  vec3 planetCenter = uPlanetCenter;
-  vec3 ro = uCameraPosition - planetCenter;
-  vec3 rd = normalize(vWorldPosition - uCameraPosition);
+  // Reconstruct world ray from screen UV
+  vec2 ndc = vUV * 2.0 - 1.0;
+  vec4 nearW = uInvVP * vec4(ndc, -1.0, 1.0);
+  vec4 farW  = uInvVP * vec4(ndc,  1.0, 1.0);
+  nearW /= nearW.w;
+  farW  /= farW.w;
 
-  // Intersect with cloud shell
-  vec2 outerHit = hitSphere(ro, rd, uCloudTop);
-  vec2 innerHit = hitSphere(ro, rd, uCloudBase);
+  vec3 ro = uCameraPos - uPlanetCenter;
+  vec3 rd = normalize(farW.xyz - nearW.xyz);
 
-  // No intersection with outer cloud shell
-  if (outerHit.y < 0.0) {
-    discard;
+  // Intersect with cloud shell (between base and top altitude)
+  float cloudMid = uPlanetRadius + (uCloudBaseAlt + uCloudTopAlt) * 0.5;
+  float cloudThick = uCloudTopAlt - uCloudBaseAlt;
+
+  vec2 hit = hitSphere(ro, rd, cloudMid);
+  if (hit.y < 0.0) {
+    fragColor = vec4(0.0);
+    return;
   }
 
-  // March range: from entry of outer shell to exit (or inner shell entry)
-  float tNear = max(0.0, outerHit.x);
-  float tFar = outerHit.y;
+  float tStart = max(0.0, hit.x);
+  float tEnd = hit.y;
 
-  // Don't march through the planet
-  if (innerHit.x > 0.0) {
-    tFar = min(tFar, innerHit.x);
+  // Also check planet intersection — don't render clouds behind the surface
+  vec2 planetHit = hitSphere(ro, rd, uPlanetRadius);
+  if (planetHit.x > 0.0) {
+    tEnd = min(tEnd, planetHit.x);
   }
 
-  // Invalid range
-  if (tNear >= tFar) {
-    discard;
+  if (tStart >= tEnd) {
+    fragColor = vec4(0.0);
+    return;
   }
 
-  // Blue noise dither (reduce banding)
-  float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-  tNear += dither * (tFar - tNear) / float(uMaxSteps);
+  // Sample at the midpoint (single sample — fast, no banding)
+  float tMid = (tStart + tEnd) * 0.5;
+  vec3 pos = ro + rd * tMid;
+  vec3 worldPos = pos + uPlanetCenter;
 
-  // Ray march
-  float transmittance = 1.0;
-  vec3 lightEnergy = vec3(0.0);
-  float marchLen = tFar - tNear;
+  // Cloud coverage from weather data
+  vec2 uv = worldToLatLonUV(worldPos);
+  vec4 cloudData = texture(uCloudMap, uv);
+  float coverage = cloudData.r * uCoverageMult;
+  float humidity = cloudData.g;
 
-  for (int i = 0; i < 64; i++) {
-    if (i >= uMaxSteps) break;
-    if (transmittance < 0.01) break;
-
-    float t = tNear + marchLen * (float(i) + 0.5) / float(uMaxSteps);
-    vec3 pos = uCameraPosition + rd * t;
-
-    float density = getDensity(pos);
-
-    if (density > 0.001) {
-      float stepLen = marchLen / float(uMaxSteps);
-      float extinction = density * stepLen;
-      transmittance *= exp(-extinction);
-
-      // Light march (simplified — single sample)
-      float lightDensity = 0.0;
-      float lightStep = 400.0;
-      for (int j = 0; j < 4; j++) {
-        if (j >= uLightSteps) break;
-        vec3 lp = pos + uSunDirection * float(j) * lightStep;
-        lightDensity += getDensity(lp) * lightStep * 0.5;
-      }
-      float lightTrans = exp(-lightDensity * 0.3);
-
-      // Phase function
-      float cosTheta = dot(rd, uSunDirection);
-      float pf = phase(cosTheta);
-
-      // Silver lining
-      float silver = 0.0;
-      if (cosTheta < -0.3) {
-        silver = pow(max(0.0, -cosTheta - 0.3) / 0.7, 2.0) * 0.4;
-      }
-
-      // Accumulate light
-      vec3 scatter = uSunColor * (lightTrans * pf + silver);
-      vec3 ambient = vec3(0.3, 0.4, 0.6) * 0.12;
-      lightEnergy += transmittance * extinction * (scatter + ambient);
-    }
+  // Skip if no coverage
+  if (coverage < 0.01) {
+    fragColor = vec4(0.0);
+    return;
   }
 
-  float alpha = 1.0 - transmittance;
-  alpha = smoothstep(0.0, 0.03, alpha); // soften very thin edges
+  // 3D noise for detail
+  float n1 = sampleNoise(pos, 0.0003);
+  float n2 = sampleNoise(pos, 0.0015);
+  float noise = n1 * 0.6 + n2 * 0.4;
 
-  gl_FragColor = vec4(lightEnergy, alpha);
+  // Height factor — clouds are thicker in the middle of the layer
+  float alt = length(pos) - uPlanetRadius;
+  float h = clamp((alt - uCloudBaseAlt) / cloudThick, 0.0, 1.0);
+  float heightMask = smoothstep(0.0, 0.15, h) * (1.0 - smoothstep(0.75, 1.0, h));
+
+  // Final cloud density
+  float density = coverage * noise * heightMask;
+  density = smoothstep(0.08, 0.5, density); // threshold for cloud edges
+
+  if (density < 0.01) {
+    fragColor = vec4(0.0);
+    return;
+  }
+
+  // ── Windy Blue Mode Color Grading ──
+  // Sun direction
+  vec3 sunDir = normalize(vec3(0.6, 0.8, -0.4));
+  vec3 viewDir = normalize(uCameraPos - worldPos);
+
+  // Phase function for forward scattering
+  float cosTheta = dot(-rd, sunDir);
+  float pf = mix(phase(cosTheta, -0.2), phase(cosTheta, 0.6), 0.7);
+
+  // Blue palette: deep blue → light blue → white
+  vec3 deepBlue  = vec3(0.08, 0.15, 0.35);  // shadow / thick cloud
+  vec3 midBlue   = vec3(0.35, 0.55, 0.85);   // mid-lit
+  vec3 lightBlue = vec3(0.7, 0.82, 0.95);    // sun-lit edge
+  vec3 white     = vec3(0.95, 0.97, 1.0);    // bright highlight
+
+  // Mix colors based on density and lighting
+  float lighting = pf * 1.5 + 0.15; // ambient + scattering
+  lighting = clamp(lighting, 0.0, 1.5);
+
+  vec3 cloudColor;
+  if (density < 0.3) {
+    // Thin edges — light blue to white
+    cloudColor = mix(lightBlue, white, lighting * 0.6);
+  } else if (density < 0.7) {
+    // Medium — blue tones
+    cloudColor = mix(midBlue, lightBlue, lighting * 0.5);
+  } else {
+    // Thick — deep blue to mid blue
+    cloudColor = mix(deepBlue, midBlue, lighting * 0.4);
+  }
+
+  // Add slight silver lining on bright edges
+  float silverLining = pow(max(0.0, lighting - 0.8), 2.0) * 0.5;
+  cloudColor += vec3(silverLining);
+
+  // Humidity influence — more humid = slightly more opaque
+  float alphaBoost = mix(1.0, 1.3, humidity);
+
+  // Final alpha — scaled by density and view angle
+  float alpha = density * uOpacity * alphaBoost;
+  alpha *= smoothstep(0.0, 0.05, density); // soft edges
+
+  // Fade out when very close to cloud layer (avoid z-fighting with globe)
+  float viewDist = length(ro);
+  float distToCloud = abs(viewDist - cloudMid);
+  float fadeNear = smoothstep(0.0, cloudThick * 0.5, distToCloud);
+  alpha *= fadeNear;
+
+  fragColor = vec4(cloudColor, alpha);
 }
