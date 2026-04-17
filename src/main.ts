@@ -27,8 +27,8 @@ async function init() {
   const stars = createSkybox();
   scene.add(stars);
 
-  // Globe (procedural earth textures by AgentA)
-  const globe = createGlobe();
+  // Globe (real NASA Blue Marble textures by AgentA)
+  const { mesh: globe, onLoad: globeReady } = createGlobe();
   scene.add(globe);
 
   // Globe lighting (day/night cycle + night glow)
