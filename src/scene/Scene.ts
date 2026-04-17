@@ -14,11 +14,11 @@ export function createScene(container: HTMLElement) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.2; // Slightly brighter for better cloud visibility
+  renderer.toneMappingExposure = 1.2;
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000510); // Deep space blue-black
+  scene.background = new THREE.Color(0x000510);
 
   // Main sun light (warm white)
   const sun = new THREE.DirectionalLight(0xfff5e0, 2.0);
@@ -32,6 +32,9 @@ export function createScene(container: HTMLElement) {
   // Hemisphere light for sky/ground color variation
   const hemi = new THREE.HemisphereLight(0x88aaff, 0x443322, 0.15);
   scene.add(hemi);
+
+  // Expose the scene sun for GlobeLighting to reference
+  (scene as any).__sun = sun;
 
   return { renderer, scene };
 }

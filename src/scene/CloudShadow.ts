@@ -13,7 +13,7 @@ export class CloudShadow {
   private material: THREE.ShaderMaterial;
   private cloudTexture: THREE.DataTexture | null = null;
 
-  constructor(scene: THREE.Scene, private globe: THREE.Mesh, private weather: WeatherManager) {
+  constructor(parent: THREE.Object3D, private globe: THREE.Mesh, private weather: WeatherManager) {
     // Shadow shell slightly above globe surface
     const radius = GLOBE_RADIUS * 1.001;
     const geometry = new THREE.SphereGeometry(radius, 128, 64);
@@ -85,13 +85,19 @@ export class CloudShadow {
 
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.name = 'cloudShadow';
-    scene.add(this.mesh);
+    this.mesh.renderOrder = 3; // below clouds (10) and overlays (5)
+    parent.add(this.mesh);
   }
 
   /**
    * Update cloud shadow with new cloud coverage data.
    */
   update(dt: number, sunDirection: THREE.Vector3): void {
+    // Respect cloud layer toggle
+    const cloudsActive = this.weather.isLayerActive('clouds');
+    this.mesh.visible = cloudsActive;
+    if (!cloudsActive) return;
+
     this.material.uniforms.uTime.value += dt;
     this.material.uniforms.uSunDirection.value.copy(sunDirection);
 
@@ -105,9 +111,7 @@ export class CloudShadow {
         this.updateCloudTexture(coverage);
       }
     }
-
-    // Sync rotation with globe
-    this.mesh.rotation.y = this.globe.rotation.y;
+    // No manual rotation sync needed — child of globe rotates automatically
   }
 
   /**

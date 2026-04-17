@@ -21,7 +21,7 @@ export class WeatherOverlay {
   private layers: Map<WeatherLayer, LayerConfig> = new Map();
   private activeLayer: WeatherLayer | null = null;
 
-  constructor(scene: THREE.Scene, private weather: WeatherManager) {
+  constructor(parent: THREE.Object3D, private weather: WeatherManager) {
     // Create one sphere + material per overlay type
     const layerDefs: Array<{ name: WeatherLayer; mode: number }> = [
       { name: 'temperature', mode: 0 },
@@ -31,7 +31,7 @@ export class WeatherOverlay {
 
     for (const def of layerDefs) {
       const config = this.createLayer(def.name, def.mode);
-      scene.add(config.mesh);
+      parent.add(config.mesh);
       this.layers.set(def.name, config);
     }
 
@@ -169,7 +169,7 @@ export class WeatherOverlay {
   }
 
   /**
-   * Update per frame.
+   * Update per frame — only updates texture when an overlay is visible.
    */
   update(dt: number): void {
     if (this.activeLayer && this.layers.has(this.activeLayer)) {

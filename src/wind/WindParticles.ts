@@ -38,7 +38,7 @@ export class WindParticles {
   private lineColors: Float32Array;
   private lineIndices: Uint32Array;
 
-  constructor(scene: THREE.Scene, private weather: WeatherManager) {
+  constructor(parent: THREE.Object3D, private weather: WeatherManager) {
     // Initialize particles
     this.positions = new Float32Array(PARTICLE_COUNT * 3);
     this.ages = new Float32Array(PARTICLE_COUNT);
@@ -101,7 +101,7 @@ export class WindParticles {
 
     this.lineSegments = new THREE.LineSegments(this.geometry, this.material);
     this.lineSegments.name = 'windParticles';
-    scene.add(this.lineSegments);
+    parent.add(this.lineSegments);
   }
 
   update(dt: number, camera: any): void {

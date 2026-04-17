@@ -52,18 +52,18 @@ async function init() {
   // Weather data
   const weather = new WeatherManager();
 
-  // Clouds
-  const clouds = new CloudRenderer(scene, weather);
+  // Clouds — child of globe so they rotate with earth
+  const clouds = new CloudRenderer(globe, weather);
   clouds.setVisible(true);
 
-  // Cloud shadows
-  const cloudShadow = new CloudShadow(scene, globe, weather);
+  // Cloud shadows — child of globe
+  const cloudShadow = new CloudShadow(globe, globe, weather);
 
-  // Weather overlays
-  const weatherOverlay = new WeatherOverlay(scene, weather);
+  // Weather overlays — child of globe
+  const weatherOverlay = new WeatherOverlay(globe, weather);
 
-  // Wind particles
-  const wind = new WindParticles(scene, weather);
+  // Wind particles — child of globe
+  const wind = new WindParticles(globe, weather);
 
   // ── UI with proper layer toggle wiring ──────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -147,6 +147,8 @@ async function init() {
       globeAngle += dt * 0.03; // slow spin
       globe.rotation.y = globeAngle;
       atmosphereGroup.rotation.y = globeAngle;
+      // clouds, wind, weatherOverlay, cloudShadow are now children of globe
+      // so they rotate automatically — no manual sync needed
     }
 
     // Camera

@@ -115,7 +115,9 @@ vec2 hitSphere(vec3 ro, vec3 rd, float radius) {
 }
 
 void main() {
-  vec3 ro = uCameraPosition - uPlanetCenter;
+  // ro = camera position relative to planet center (both in world space)
+  vec3 planetCenter = uPlanetCenter;
+  vec3 ro = uCameraPosition - planetCenter;
   vec3 rd = normalize(vWorldPosition - uCameraPosition);
 
   // Intersect with cloud shell

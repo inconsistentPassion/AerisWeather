@@ -69,6 +69,10 @@ export class GlobeLighting {
     this.nightGlow.position.copy(this.globe.position);
     this.nightGlow.rotation.y = this.sunAngle + Math.PI;
     this.nightGlow.visible = sunElevation < 0.3;
+
+    // Update night glow sun direction
+    const nightGlowMat = this.nightGlow.material as THREE.ShaderMaterial;
+    nightGlowMat.uniforms.uSunDirection.value.copy(this.sunLight.position).normalize();
   }
 
   /**
@@ -135,7 +139,7 @@ export class GlobeLighting {
   updateCameraPosition(pos: THREE.Vector3): void {
     const mat = this.nightGlow.material as THREE.ShaderMaterial;
     mat.uniforms.uCameraPosition.value.copy(pos);
-    mat.uniforms.uSunDirection.value.copy(this.sunLight.position).normalize();
+    // Don't overwrite uSunDirection here — it's set in updateTime()
   }
 
   /**

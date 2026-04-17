@@ -15,14 +15,17 @@ import cloudVertexShader from '../shaders/cloud.vert';
 import cloudFragmentShader from '../shaders/cloud.frag';
 import { generatePerlinWorley3D } from '../utils/Noise3D';
 
+// Reusable temp vector for world position calculation
+const _worldPos = new THREE.Vector3();
+
 export class CloudRenderer {
   private material: THREE.ShaderMaterial;
   private mesh: THREE.Mesh;
   private cloudMapTexture: THREE.DataTexture;
   private noiseTexture: THREE.Data3DTexture;
 
-  constructor(scene: THREE.Scene, private weather: WeatherManager) {
-    // Generate 3D noise texture (64³ for speed, single channel)
+  constructor(parent: THREE.Object3D, private weather: WeatherManager) {
+    // Generate 3D noise texture (64³ for speed, RGBA for compatibility)
     this.noiseTexture = this.generateNoise3D(64);
 
     // Cloud coverage data texture
@@ -60,7 +63,7 @@ export class CloudRenderer {
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.name = 'clouds';
     this.mesh.renderOrder = 10; // render after globe
-    scene.add(this.mesh);
+    parent.add(this.mesh);
 
     // Listen for weather data changes
     this.weather.on('dataLoaded', () => this.updateCloudMap());
@@ -69,11 +72,18 @@ export class CloudRenderer {
   }
 
   update(dt: number, camera: any): void {
-    // Toggle visibility based on layer state
-    this.mesh.visible = this.weather.isLayerActive('clouds');
+    const active = this.weather.isLayerActive('clouds');
+    this.mesh.visible = active;
+
+    if (!active) return; // skip shader updates when not visible
 
     this.material.uniforms.uTime.value += dt;
     this.material.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
+
+    // Sync planet center with globe's world position
+    // (critical since cloud mesh is a child of the globe)
+    this.mesh.getWorldPosition(_worldPos);
+    this.material.uniforms.uPlanetCenter.value.copy(_worldPos);
 
     // Slow wind drift
     this.material.uniforms.uWindVelocity.value.set(0.0003, 0.0002);
@@ -140,16 +150,25 @@ export class CloudRenderer {
   }
 
   /**
-   * Generate single-channel 3D Perlin-Worley noise.
+   * Generate RGBA 3D noise texture for maximum GPU compatibility.
+   * Stores the noise value in R channel (G=B=A=1 for safety).
    */
   private generateNoise3D(size: number): THREE.Data3DTexture {
     const rawData = generatePerlinWorley3D(size);
-    const data = new Float32Array(rawData);
+    // Convert single-channel to RGBA for broad WebGL2 compatibility
+    const data = new Float32Array(size * size * size * 4);
+    for (let i = 0; i < rawData.length; i++) {
+      const i4 = i * 4;
+      data[i4] = rawData[i];       // R = noise
+      data[i4 + 1] = rawData[i];   // G = noise (backup for platforms)
+      data[i4 + 2] = rawData[i];   // B = noise
+      data[i4 + 3] = 1.0;          // A = 1
+    }
 
     const texture = new THREE.Data3DTexture(data, size, size, size);
-    texture.format = THREE.RedFormat;
+    texture.format = THREE.RGBAFormat;
     texture.type = THREE.FloatType;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.minFilter = THREE.LinearFilter;  // No mipmaps — LinearFilter is correct
     texture.magFilter = THREE.LinearFilter;
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
