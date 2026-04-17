@@ -147,9 +147,13 @@ export class WindParticles {
       this.speeds[i] = windSpeed;
 
       // Convert wind to position delta on sphere
-      const speedScale = 0.0015 * dt;
-      const dLon = windU * speedScale / Math.max(0.01, Math.cos(lat));
-      const dLat = windV * speedScale;
+      // u/v already contain speed magnitude — don't multiply by speed again
+      const SPEED_SCALE = 0.0004 * dt;
+      const MAX_WIND = 40;
+      const uC = Math.abs(windU) > MAX_WIND ? Math.sign(windU) * MAX_WIND : windU;
+      const vC = Math.abs(windV) > MAX_WIND ? Math.sign(windV) * MAX_WIND : windV;
+      const dLon = uC * SPEED_SCALE / Math.max(0.3, Math.cos(lat));
+      const dLat = vC * SPEED_SCALE;
 
       const newLon = lon + dLon;
       const newLat = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, lat + dLat));

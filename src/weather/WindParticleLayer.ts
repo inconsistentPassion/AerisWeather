@@ -14,7 +14,8 @@ const TOTAL_PARTICLES = 3000;
 const MAX_DRAWN = 1000;
 const TRAIL_LEN = 8;
 const MAX_AGE = 180;
-const STEP_DEG = 0.0012;
+const SPEED_SCALE = 0.0004;  // degrees per m/s per frame — tuned for smooth Windy-like motion
+const MAX_WIND_CLAMP = 40;   // m/s — cap to prevent visual artifacts in extreme winds
 const GLOBE_RADIUS = 6371000; // metres (MapLibre WGS84)
 
 export class WindParticleLayer {
@@ -201,11 +202,14 @@ export class WindParticleLayer {
       const wind = this.sampleWind(u, v, this.lon[i], this.lat[i], gw, gh);
       this.spd[i] = wind.speed;
 
-      /* advect */
+      /* advect — u/v already contain speed magnitude, don't multiply by speed again */
       if (wind.speed >= 0.3) {
         const cosLat = Math.max(0.3, Math.cos(this.lat[i] * Math.PI / 180));
-        this.lon[i] += wind.u * wind.speed * STEP_DEG / cosLat;
-        this.lat[i] += wind.v * wind.speed * STEP_DEG;
+        // Clamp extreme winds to prevent unrealistic particle velocities
+        const uClamped = Math.abs(wind.u) > MAX_WIND_CLAMP ? Math.sign(wind.u) * MAX_WIND_CLAMP : wind.u;
+        const vClamped = Math.abs(wind.v) > MAX_WIND_CLAMP ? Math.sign(wind.v) * MAX_WIND_CLAMP : wind.v;
+        this.lon[i] += uClamped * SPEED_SCALE / cosLat;
+        this.lat[i] += vClamped * SPEED_SCALE;
         if (this.lon[i] > 180) this.lon[i] -= 360;
         if (this.lon[i] < -180) this.lon[i] += 360;
         this.lat[i] = Math.max(-85, Math.min(85, this.lat[i]));
@@ -279,20 +283,27 @@ export class WindParticleLayer {
         }
       }
 
-      /* trail segments */
-      this.ctx.lineWidth = Math.min(2.5, 0.8 + s * 0.06);
-      this.ctx.lineCap = 'round';
-      this.ctx.lineJoin = 'round';
+      /* trail segments — skip if trail not yet filled (prevents ghost lines to origin) */
+      const trailReady = this.age[i] >= TRAIL_LEN;
+      if (trailReady) {
+        this.ctx.lineWidth = Math.min(2.5, 0.8 + s * 0.06);
+        this.ctx.lineCap = 'round';
+        this.ctx.lineJoin = 'round';
 
-      for (let t = 0; t < TRAIL_LEN - 1; t++) {
-        // skip segments touching back-facing points
-        if (pts[t][0] < -9000 || pts[t + 1][0] < -9000) continue;
-        const segAlpha = ((t + 1) / TRAIL_LEN) * ageAlpha * 0.75;
-        this.ctx.beginPath();
-        this.ctx.moveTo(pts[t][0], pts[t][1]);
-        this.ctx.lineTo(pts[t + 1][0], pts[t + 1][1]);
-        this.ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${segAlpha.toFixed(3)})`;
-        this.ctx.stroke();
+        for (let t = 0; t < TRAIL_LEN - 1; t++) {
+          // skip segments touching back-facing points
+          if (pts[t][0] < -9000 || pts[t + 1][0] < -9000) continue;
+          // skip segments with implausibly long jumps (antimeridian / reset artifacts)
+          const dx = pts[t + 1][0] - pts[t][0];
+          const dy = pts[t + 1][1] - pts[t][1];
+          if (dx * dx + dy * dy > 200 * 200) continue;
+          const segAlpha = ((t + 1) / TRAIL_LEN) * ageAlpha * 0.75;
+          this.ctx.beginPath();
+          this.ctx.moveTo(pts[t][0], pts[t][1]);
+          this.ctx.lineTo(pts[t + 1][0], pts[t + 1][1]);
+          this.ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${segAlpha.toFixed(3)})`;
+          this.ctx.stroke();
+        }
       }
 
       /* head dot (skip if back-facing) */
