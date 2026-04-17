@@ -1,240 +1,119 @@
 /**
- * Globe — Earth sphere with realistic continent shapes.
- * Uses multi-octave noise to generate recognizable landmasses.
+ * Globe — Earth sphere with real NASA Blue Marble textures.
+ * Loads actual Earth imagery instead of procedural patterns.
  */
 
 import * as THREE from 'three';
 
 export const GLOBE_RADIUS = 6371; // km, arbitrary units
 
-// ── Improved noise functions ──────────────────────────────────────────
-
-function hash(x: number, y: number): number {
-  let h = x * 374761393 + y * 668265263;
-  h = ((h ^ (h >> 13)) * 1274126177) | 0;
-  return (h & 0x7fffffff) / 0x7fffffff;
-}
-
-function smoothNoise(x: number, y: number): number {
-  const ix = Math.floor(x), iy = Math.floor(y);
-  const fx = x - ix, fy = y - iy;
-  const sx = fx * fx * (3 - 2 * fx);
-  const sy = fy * fy * (3 - 2 * fy);
-  const n00 = hash(ix, iy);
-  const n10 = hash(ix + 1, iy);
-  const n01 = hash(ix, iy + 1);
-  const n11 = hash(ix + 1, iy + 1);
-  return n00 + sx * (n10 - n00) + sy * (n01 - n00) + sx * sy * (n00 - n10 - n01 + n11);
-}
-
-function fbm(x: number, y: number, octaves: number): number {
-  let val = 0, amp = 0.5, freq = 1;
-  for (let i = 0; i < octaves; i++) {
-    val += amp * smoothNoise(x * freq, y * freq);
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return val;
-}
-
-function ridgedNoise(x: number, y: number, octaves: number): number {
-  let val = 0, amp = 0.5, freq = 1;
-  for (let i = 0; i < octaves; i++) {
-    const n = 1 - Math.abs(smoothNoise(x * freq, y * freq) * 2 - 1);
-    val += amp * n * n;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return val;
-}
-
-/**
- * Continent generation using shaped noise.
- * Creates recognizable land/ocean patterns with latitude-based biomes.
- */
-function getTerrainHeight(lon: number, lat: number): number {
-  // Normalize to 0-1 range
-  const nx = (lon + Math.PI) / (2 * Math.PI);
-  const ny = (lat + Math.PI / 2) / Math.PI;
-
-  // Base continent shapes — multiple overlapping blobs
-  let continent = 0;
-
-  // Large continental masses
-  continent += Math.pow(fbm(nx * 3 + 0.5, ny * 2.5 + 0.3, 5), 1.5) * 0.6;
-
-  // Ridge noise for coastlines
-  continent += ridgedNoise(nx * 4 + 2.1, ny * 3 + 1.7, 4) * 0.25;
-
-  // Fine detail
-  continent += fbm(nx * 8 + 5.3, ny * 6 + 3.1, 3) * 0.15;
-
-  // Continent threshold — push toward binary land/ocean
-  continent = (continent - 0.42) * 3;
-  continent = Math.max(-1, Math.min(1, continent));
-
-  return continent;
-}
-
-/**
- * Biome color based on latitude and terrain height.
- */
-function getBiomeColor(lat: number, height: number): [number, number, number] {
-  const absLat = Math.abs(lat);
-  const latDeg = absLat * (180 / Math.PI);
-
-  if (height < 0) {
-    // Ocean — depth-based coloring
-    const depth = -height;
-    const shallow = depth < 0.15;
-    if (shallow) {
-      // Shallow/coastal — lighter blue-green
-      return [30 + depth * 100, 90 + depth * 80, 140 + depth * 60];
-    }
-    // Deep ocean
-    const d = Math.min(depth, 1);
-    return [8 + d * 5, 20 + d * 15, 60 + d * 40];
-  }
-
-  // Land
-  if (latDeg > 75) {
-    // Polar ice/snow
-    const ice = 200 + height * 30;
-    return [ice, ice + 5, ice + 10];
-  }
-
-  if (latDeg > 55) {
-    // Boreal/taiga — dark green to tundra
-    const tundra = Math.max(0, (latDeg - 55) / 20);
-    const g = 60 + height * 30 - tundra * 40;
-    return [50 + tundra * 100, g, 35 + tundra * 80];
-  }
-
-  if (latDeg > 35) {
-    // Temperate — green with variation
-    const n = fbm(lat * 5, height * 3, 3);
-    return [60 + n * 30, 90 + height * 40 + n * 20, 40 + n * 15];
-  }
-
-  if (latDeg > 15) {
-    // Subtropical — mix of green and dry
-    const dryness = fbm(lat * 2 + 1.5, height * 2, 3);
-    if (dryness > 0.5) {
-      // Desert/savanna
-      return [160 + dryness * 40, 130 + dryness * 30, 80 + dryness * 20];
-    }
-    return [50 + dryness * 20, 100 + height * 30, 35];
-  }
-
-  // Tropical — dense green
-  const jungle = fbm(lat * 3 + 0.7, height * 4 + 2.3, 4);
-  return [30 + jungle * 25, 80 + height * 30 + jungle * 20, 25 + jungle * 15];
-}
-
-// ── Texture generation ────────────────────────────────────────────────
-
-export function createGlobe(): THREE.Mesh {
+export function createGlobe(): { mesh: THREE.Mesh; onLoad: Promise<void> } {
   const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 256, 256);
 
-  const colorMap = generateEarthTexture(2048, 1024);
-  const normalMap = generateNormalMap(1024, 512);
-  const roughnessMap = generateRoughnessMap(1024, 512);
-
-  const material = new THREE.MeshStandardMaterial({
-    map: colorMap,
-    normalMap: normalMap,
-    normalScale: new THREE.Vector2(0.4, 0.4),
-    roughnessMap: roughnessMap,
+  // Placeholder material while textures load
+  const placeholderMat = new THREE.MeshStandardMaterial({
+    color: 0x2255aa,
     roughness: 0.8,
     metalness: 0.02,
   });
 
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, placeholderMat);
   mesh.name = 'globe';
-  return mesh;
+
+  // Load real textures
+  const loader = new THREE.TextureLoader();
+  const textureBase = '/textures';
+
+  const loadPromise = new Promise<void>((resolve) => {
+    // Load color map (NASA Blue Marble 5400x2700)
+    loader.load(`${textureBase}/earth_color_8k.jpg`, (colorMap) => {
+      colorMap.colorSpace = THREE.SRGBColorSpace;
+      colorMap.wrapS = THREE.RepeatWrapping;
+      colorMap.wrapT = THREE.ClampToEdgeWrapping;
+      colorMap.anisotropy = 4;
+
+      // Generate roughness map from color (ocean detection)
+      const roughnessMap = generateRoughnessFromColor(colorMap);
+
+      // Apply to mesh
+      const material = new THREE.MeshStandardMaterial({
+        map: colorMap,
+        roughnessMap: roughnessMap,
+        roughness: 0.75,
+        metalness: 0.01,
+      });
+
+      mesh.material = material;
+      material.needsUpdate = true;
+
+      resolve();
+    });
+  });
+
+  return { mesh, onLoad: loadPromise };
 }
 
-function generateEarthTexture(w: number, h: number): THREE.DataTexture {
-  const data = new Uint8Array(w * h * 4);
+/**
+ * Generate a roughness map by detecting ocean pixels (blue-ish) from the color map.
+ * Oceans = smooth (low roughness), Land = rough (high roughness).
+ */
+function generateRoughnessFromColor(colorMap: THREE.Texture): THREE.DataTexture {
+  const img = colorMap.image as HTMLImageElement;
+  const w = img.width;
+  const h = img.height;
 
-  for (let y = 0; y < h; y++) {
-    const lat = (y / h) * Math.PI - Math.PI / 2;
-    for (let x = 0; x < w; x++) {
-      const lon = (x / w) * Math.PI * 2 - Math.PI;
-      const idx = (y * w + x) * 4;
+  // Draw image to canvas to read pixels
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0);
+  const pixels = ctx.getImageData(0, 0, w, h).data;
 
-      const height = getTerrainHeight(lon, lat);
-      const [r, g, b] = getBiomeColor(lat, height);
+  // Generate roughness at lower resolution
+  const rw = 512;
+  const rh = 256;
+  const roughness = new Uint8Array(rw * rh * 4);
 
-      data[idx] = Math.floor(Math.max(0, Math.min(255, r)));
-      data[idx + 1] = Math.floor(Math.max(0, Math.min(255, g)));
-      data[idx + 2] = Math.floor(Math.max(0, Math.min(255, b)));
-      data[idx + 3] = 255;
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      // Sample from source
+      const sx = Math.floor((x / rw) * w);
+      const sy = Math.floor((y / rh) * h);
+      const si = (sy * w + sx) * 4;
+
+      const r = pixels[si];
+      const g = pixels[si + 1];
+      const b = pixels[si + 2];
+
+      // Simple ocean detection: blue dominance
+      const isOcean = b > r * 1.3 && b > g * 1.1;
+
+      // Ice/snow detection (high brightness, polar regions)
+      const brightness = (r + g + b) / 3;
+      const isIce = brightness > 200;
+
+      let rough: number;
+      if (isOcean) {
+        // Ocean: very smooth with subtle wave pattern
+        rough = 15 + Math.sin(x * 0.1 + y * 0.05) * 5;
+      } else if (isIce) {
+        // Ice: medium-smooth
+        rough = 100;
+      } else {
+        // Land: rough
+        rough = 180 + Math.sin(x * 0.05) * 20;
+      }
+
+      const idx = (y * rw + x) * 4;
+      roughness[idx] = rough;
+      roughness[idx + 1] = rough;
+      roughness[idx + 2] = rough;
+      roughness[idx + 3] = 255;
     }
   }
 
-  const texture = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
-  texture.needsUpdate = true;
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.ClampToEdgeWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-function generateNormalMap(w: number, h: number): THREE.DataTexture {
-  const data = new Uint8Array(w * h * 4);
-  const scale = 2;
-
-  for (let y = 0; y < h; y++) {
-    const lat = (y / h) * Math.PI - Math.PI / 2;
-    for (let x = 0; x < w; x++) {
-      const lon = (x / w) * Math.PI * 2 - Math.PI;
-      const idx = (y * w + x) * 4;
-
-      // Height gradient for normal
-      const hL = getTerrainHeight(lon - scale / w * Math.PI * 2, lat);
-      const hR = getTerrainHeight(lon + scale / w * Math.PI * 2, lat);
-      const hD = getTerrainHeight(lon, lat - scale / h * Math.PI);
-      const hU = getTerrainHeight(lon, lat + scale / h * Math.PI);
-
-      const dx = (hR - hL) * 8;
-      const dz = (hU - hD) * 8;
-
-      data[idx] = Math.floor(128 + dx * 60);
-      data[idx + 1] = 255;
-      data[idx + 2] = Math.floor(128 + dz * 60);
-      data[idx + 3] = 255;
-    }
-  }
-
-  const texture = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
-  texture.needsUpdate = true;
-  return texture;
-}
-
-function generateRoughnessMap(w: number, h: number): THREE.DataTexture {
-  const data = new Uint8Array(w * h * 4);
-
-  for (let y = 0; y < h; y++) {
-    const lat = (y / h) * Math.PI - Math.PI / 2;
-    for (let x = 0; x < w; x++) {
-      const lon = (x / w) * Math.PI * 2 - Math.PI;
-      const idx = (y * w + x) * 4;
-
-      const height = getTerrainHeight(lon, lat);
-
-      // Ocean = smooth (low roughness), Land = rough (high roughness)
-      const roughness = height < 0 ? 0.08 + Math.abs(height) * 0.15 : 0.65 + height * 0.2;
-      const val = Math.floor(Math.max(0, Math.min(255, roughness * 255)));
-
-      data[idx] = val;
-      data[idx + 1] = val;
-      data[idx + 2] = val;
-      data[idx + 3] = 255;
-    }
-  }
-
-  const texture = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  const texture = new THREE.DataTexture(roughness, rw, rh, THREE.RGBAFormat);
   texture.needsUpdate = true;
   return texture;
 }
