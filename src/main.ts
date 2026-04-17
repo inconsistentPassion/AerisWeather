@@ -10,7 +10,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
-import { createWindParticleLayer } from './weather/WindParticleLayer';
+import { WindParticleLayer } from './weather/WindParticleLayer';
 import { createCloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
@@ -52,9 +52,8 @@ async function init() {
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
   // ── Add weather layers ─────────────────────────────────────────────
-  // Animated wind particles (WebGL custom layer — on the globe surface)
-  const windLayer = createWindParticleLayer(weather);
-  map.addLayer(windLayer);
+  // Animated wind particles (MapLibre circle layer — globe-correct)
+  const windParticles = new WindParticleLayer(map, weather);
 
   // Volumetric clouds (WebGL custom layer)
   const cloudLayer = createCloudLayer(weather);
@@ -72,10 +71,7 @@ async function init() {
 
       switch (layer) {
         case 'wind':
-          try {
-            map.setLayoutProperty('wind-particles', 'visibility',
-              active ? 'visible' : 'none');
-          } catch { /* not yet added */ }
+          windParticles.setVisible(active);
           break;
         case 'clouds':
           try {
