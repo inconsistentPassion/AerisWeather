@@ -1,14 +1,16 @@
 /**
- * Globe — Earth sphere with realistic procedural continents.
- * No external textures needed — generates recognizable Earth-like landmasses
- * using layered noise with continental shelf simulation.
+ * Globe — Earth sphere with streaming map tiles.
+ *
+ * Uses TileTexture engine for progressive tile loading as camera zooms.
+ * Falls back to procedural Earth textures if tiles fail to load.
  */
 
 import * as THREE from 'three';
+import { createTileEngine, type TileEngine } from './TileTexture';
 
 export const GLOBE_RADIUS = 6371;
 
-// ── Noise primitives ──────────────────────────────────────────────────
+// ── Noise primitives (fallback only) ─────────────────────────────────
 
 function hash2D(x: number, y: number): number {
   let n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
@@ -47,39 +49,25 @@ function ridged(x: number, y: number, octaves: number): number {
   return val;
 }
 
-// ── Continent map ─────────────────────────────────────────────────────
-// Uses multiple overlapping noise layers to create continent-like shapes
-// with realistic coastlines, mountain ranges, and biome distribution.
+// ── Procedural fallback textures ──────────────────────────────────────
 
 function getElevation(lon: number, lat: number): number {
-  // Map to UV space with wrapping
   const u = (lon + Math.PI) / (2 * Math.PI);
   const v = (lat + Math.PI / 2) / Math.PI;
 
-  // === CONTINENTAL SHAPES ===
-  // Layer 1: Large-scale continent placement
-  // Using very low frequency noise to create ~5-6 major landmasses
   let continent = fbm(u * 2.5 + 0.3, v * 1.8 + 0.7, 5, 2.0, 0.55);
-
-  // Layer 2: Secondary continent features
   continent += fbm(u * 4.0 + 3.14, v * 3.0 + 1.57, 4, 2.2, 0.45) * 0.4;
-
-  // Layer 3: Ridged noise for peninsula/mountain-like features
   continent += ridged(u * 3.0 + 1.2, v * 2.5 + 2.8, 4) * 0.2;
 
-  // Continent threshold — creates sharp coastlines
-  // Values > threshold = land, < threshold = ocean
   const threshold = 0.52;
   let elev = (continent - threshold) * 4.0;
   elev = Math.max(-1, Math.min(1, elev));
 
-  // === MOUNTAINS (on land only) ===
   if (elev > 0) {
     const mountains = ridged(u * 8.0 + 5.5, v * 6.0 + 3.3, 5) * 0.3;
-    elev += mountains * elev; // more mountains where land is higher
+    elev += mountains * elev;
   }
 
-  // === ISLANDS (scattered in oceans) ===
   const islands = fbm(u * 12.0 + 7.7, v * 10.0 + 4.4, 4, 2.5, 0.4);
   if (elev < -0.3 && islands > 0.72) {
     elev = (islands - 0.72) * 3.0;
@@ -88,93 +76,59 @@ function getElevation(lon: number, lat: number): number {
   return elev;
 }
 
-// ── Biome coloring ────────────────────────────────────────────────────
-
 function getPixelColor(elev: number, lat: number): [number, number, number] {
   const absLat = Math.abs(lat);
   const latDeg = absLat * (180 / Math.PI);
 
   if (elev < 0) {
-    // === OCEAN ===
     const depth = Math.min(-elev, 1);
-    // Shallow water near coasts
-    if (depth < 0.15) {
-      return [35, 100 + depth * 200, 150 + depth * 300];
-    }
-    // Deep ocean
+    if (depth < 0.15) return [35, 100 + depth * 200, 150 + depth * 300];
     const d = Math.min(depth * 1.5, 1);
     return [10 + (1 - d) * 15, 25 + (1 - d) * 30, 70 + (1 - d) * 50];
   }
 
-  // === LAND ===
   const e = Math.min(elev, 1);
 
-  if (latDeg > 72) {
-    // Polar ice
-    const ice = 210 + e * 30;
-    return [ice, ice + 5, ice + 12];
-  }
-
+  if (latDeg > 72) { const ice = 210 + e * 30; return [ice, ice + 5, ice + 12]; }
   if (latDeg > 55) {
-    // Boreal / tundra
-    if (e > 0.5) return [140 + e * 40, 135 + e * 30, 120 + e * 20]; // alpine
+    if (e > 0.5) return [140 + e * 40, 135 + e * 30, 120 + e * 20];
     return [45 + e * 20, 65 + e * 25 + (1 - (latDeg - 55) / 20) * 20, 35 + e * 10];
   }
-
   if (latDeg > 35) {
-    // Temperate
-    if (e > 0.6) return [130 + e * 30, 125 + e * 25, 110 + e * 20]; // mountains
+    if (e > 0.6) return [130 + e * 30, 125 + e * 25, 110 + e * 20];
     const variation = smoothNoise(lat * 10, e * 20) * 0.3;
     return [55 + variation * 30, 85 + e * 35 + variation * 15, 40 + variation * 10];
   }
-
   if (latDeg > 20) {
-    // Subtropical — drier
     const dryness = smoothNoise(lat * 8 + 2.5, e * 15 + 1.3);
-    if (dryness > 0.55) {
-      // Desert / savanna
-      const d = (dryness - 0.55) / 0.45;
-      return [170 + d * 40, 140 + d * 25, 80 + d * 15];
-    }
+    if (dryness > 0.55) { const d = (dryness - 0.55) / 0.45; return [170 + d * 40, 140 + d * 25, 80 + d * 15]; }
     return [50 + dryness * 20, 95 + e * 30, 35];
   }
-
   if (latDeg > 10) {
-    // Tropical savanna
     const wetness = smoothNoise(lat * 6 + 3.7, e * 12 + 5.1);
-    if (wetness < 0.45) {
-      // Dry season / savanna
-      return [130 + wetness * 30, 115 + wetness * 20, 60 + wetness * 15];
-    }
+    if (wetness < 0.45) return [130 + wetness * 30, 115 + wetness * 20, 60 + wetness * 15];
     return [35 + wetness * 15, 80 + e * 25, 28];
   }
 
-  // Equatorial — dense rainforest
   const jungle = smoothNoise(lat * 15 + 0.7, e * 18 + 2.3);
   return [25 + jungle * 20, 70 + e * 25 + jungle * 15, 22 + jungle * 10];
 }
 
-// ── Texture generation ────────────────────────────────────────────────
-
 function generateEarthColor(w: number, h: number): THREE.DataTexture {
   const data = new Uint8Array(w * h * 4);
-
   for (let y = 0; y < h; y++) {
     const lat = (y / h) * Math.PI - Math.PI / 2;
     for (let x = 0; x < w; x++) {
       const lon = (x / w) * Math.PI * 2 - Math.PI;
       const idx = (y * w + x) * 4;
-
       const elev = getElevation(lon, lat);
       const [r, g, b] = getPixelColor(elev, lat);
-
       data[idx] = Math.max(0, Math.min(255, r | 0));
       data[idx + 1] = Math.max(0, Math.min(255, g | 0));
       data[idx + 2] = Math.max(0, Math.min(255, b | 0));
       data[idx + 3] = 255;
     }
   }
-
   const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
   tex.needsUpdate = true;
   tex.wrapS = THREE.RepeatWrapping;
@@ -185,34 +139,19 @@ function generateEarthColor(w: number, h: number): THREE.DataTexture {
 
 function generateRoughness(w: number, h: number): THREE.DataTexture {
   const data = new Uint8Array(w * h * 4);
-
   for (let y = 0; y < h; y++) {
     const lat = (y / h) * Math.PI - Math.PI / 2;
     for (let x = 0; x < w; x++) {
       const lon = (x / w) * Math.PI * 2 - Math.PI;
       const idx = (y * w + x) * 4;
-
       const elev = getElevation(lon, lat);
       let rough: number;
-
-      if (elev < 0) {
-        // Ocean — smooth, specular
-        rough = 12 + Math.abs(elev) * 20;
-      } else if (Math.abs(lat) > 1.25) {
-        // Ice — medium
-        rough = 100;
-      } else {
-        // Land — rough
-        rough = 160 + elev * 60;
-      }
-
-      data[idx] = rough;
-      data[idx + 1] = rough;
-      data[idx + 2] = rough;
-      data[idx + 3] = 255;
+      if (elev < 0) rough = 12 + Math.abs(elev) * 20;
+      else if (Math.abs(lat) > 1.25) rough = 100;
+      else rough = 160 + elev * 60;
+      data[idx] = rough; data[idx + 1] = rough; data[idx + 2] = rough; data[idx + 3] = 255;
     }
   }
-
   const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
   tex.needsUpdate = true;
   return tex;
@@ -221,28 +160,19 @@ function generateRoughness(w: number, h: number): THREE.DataTexture {
 function generateNormal(w: number, h: number): THREE.DataTexture {
   const data = new Uint8Array(w * h * 4);
   const step = 0.003;
-
   for (let y = 0; y < h; y++) {
     const lat = (y / h) * Math.PI - Math.PI / 2;
     for (let x = 0; x < w; x++) {
       const lon = (x / w) * Math.PI * 2 - Math.PI;
       const idx = (y * w + x) * 4;
-
-      const hL = getElevation(lon - step, lat);
-      const hR = getElevation(lon + step, lat);
-      const hD = getElevation(lon, lat - step * 0.5);
-      const hU = getElevation(lon, lat + step * 0.5);
-
-      const dx = (hR - hL) * 12;
-      const dz = (hU - hD) * 12;
-
+      const dx = (getElevation(lon + step, lat) - getElevation(lon - step, lat)) * 12;
+      const dz = (getElevation(lon, lat + step * 0.5) - getElevation(lon, lat - step * 0.5)) * 12;
       data[idx] = Math.max(0, Math.min(255, 128 + dx * 50 | 0));
       data[idx + 1] = 255;
       data[idx + 2] = Math.max(0, Math.min(255, 128 + dz * 50 | 0));
       data[idx + 3] = 255;
     }
   }
-
   const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
   tex.needsUpdate = true;
   return tex;
@@ -250,9 +180,20 @@ function generateNormal(w: number, h: number): THREE.DataTexture {
 
 // ── Globe creation ────────────────────────────────────────────────────
 
-export function createGlobe(): THREE.Mesh {
+export interface GlobeHandle {
+  mesh: THREE.Mesh;
+  /** Set zoom level (0 = far, 18 = close). Maps to tile zoom internally. */
+  setZoom(zoom: number): void;
+  /** Get current tile zoom level */
+  getZoom(): number;
+  /** Whether tiles are still loading */
+  isLoading(): boolean;
+}
+
+export function createGlobe(): GlobeHandle {
   const geometry = new THREE.SphereGeometry(GLOBE_RADIUS, 256, 256);
 
+  // Procedural fallback textures
   const colorMap = generateEarthColor(1024, 512);
   const roughnessMap = generateRoughness(512, 256);
   const normalMap = generateNormal(512, 256);
@@ -269,24 +210,50 @@ export function createGlobe(): THREE.Mesh {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'globe';
 
-  // Load CARTO dark tiles asynchronously and swap when ready
-  loadTileTexture(mesh);
+  // Initialize tile streaming engine
+  const tileEngine = createTileEngine();
 
-  return mesh;
+  // Start loading tiles at initial zoom
+  initTileTexture(mesh, tileEngine);
+
+  // Map camera zoom (float) to tile zoom (int 1-6)
+  function setZoom(cameraZoom: number): void {
+    // cameraZoom is the "virtual zoom" from the camera (0-18 scale like a map).
+    // We cap tile loading at MAX_ZOOM=6 (higher zooms would need more tiles
+    // than we want to load in the browser).
+    const tileZoom = Math.max(1, Math.min(6, Math.floor(cameraZoom)));
+    tileEngine.setZoom(tileZoom);
+  }
+
+  function getZoom(): number {
+    return tileEngine.getZoom();
+  }
+
+  function isLoading(): boolean {
+    return tileEngine.isLoading();
+  }
+
+  return { mesh, setZoom, getZoom, isLoading };
 }
 
 /**
- * Load CARTO Dark Matter tiles onto the globe, replacing procedural texture.
+ * Initialize tile texture on the globe mesh.
+ * Swaps the procedural texture for the streaming tile canvas once tiles start loading.
  */
-async function loadTileTexture(mesh: THREE.Mesh): Promise<void> {
+async function initTileTexture(
+  mesh: THREE.Mesh,
+  tileEngine: TileEngine
+): Promise<void> {
   try {
-    const { buildGlobeTextureFromTiles } = await import('./TileTexture');
-    const tileTexture = await buildGlobeTextureFromTiles(4);
+    // The tile engine starts loading immediately at zoom 2.
+    // Wait a tick so at least the first batch of tiles arrives,
+    // then swap the texture.
+    await new Promise(resolve => setTimeout(resolve, 100));
+
     const mat = mesh.material as THREE.MeshStandardMaterial;
-    mat.map = tileTexture;
+    mat.map = tileEngine.texture;
     mat.needsUpdate = true;
   } catch (e) {
-    // Tiles failed to load — keep procedural fallback
-    console.warn('Tile texture load failed, using procedural fallback:', e);
+    console.warn('Tile texture init failed, using procedural fallback:', e);
   }
 }
