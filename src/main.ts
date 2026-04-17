@@ -28,13 +28,12 @@ async function init() {
   const stars = createSkybox();
   scene.add(stars);
 
-  // Globe (streaming tile Earth)
+  // Globe (procedural Earth with recognizable continents)
   const globe = createGlobe();
-  const globeMesh = globe.mesh;
-  scene.add(globeMesh);
+  scene.add(globe);
 
   // Globe lighting (day/night)
-  const globeLighting = new GlobeLighting(scene, globeMesh);
+  const globeLighting = new GlobeLighting(scene, globe);
 
   // Atmosphere
   const atmosphereGroup = createAtmosphere();
@@ -50,26 +49,21 @@ async function init() {
   // Camera
   const camera = createCamera(container);
 
-  // Wire camera zoom to globe tile loading
-  camera.onZoomChange((zoom) => globe.setZoom(zoom));
-  // Send initial zoom
-  globe.setZoom(camera.getZoom());
-
   // Weather data
   const weather = new WeatherManager();
 
   // Clouds — child of globe so they rotate with earth
-  const clouds = new CloudRenderer(globeMesh, weather);
+  const clouds = new CloudRenderer(globe, weather);
   clouds.setVisible(true);
 
-  // Cloud shadows — child of globe so they rotate with earth
-  const cloudShadow = new CloudShadow(globeMesh, globeMesh, weather);
+  // Cloud shadows — child of globe
+  const cloudShadow = new CloudShadow(globe, globe, weather);
 
   // Weather overlays — child of globe
-  const weatherOverlay = new WeatherOverlay(globeMesh, weather);
+  const weatherOverlay = new WeatherOverlay(globe, weather);
 
   // Wind particles — child of globe
-  const wind = new WindParticles(globeMesh, weather);
+  const wind = new WindParticles(globe, weather);
 
   // ── UI with proper layer toggle wiring ──────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -114,7 +108,7 @@ async function init() {
       case 'KeyR':
         camera.setMode('orbit');
         globeAngle = 0;
-        globeMesh.rotation.y = 0;
+        globe.rotation.y = 0;
         break;
       case 'Digit1':
         document.getElementById('btn-wind')?.click();
@@ -151,7 +145,7 @@ async function init() {
     // Globe rotation
     if (autoRotate) {
       globeAngle += dt * 0.03; // slow spin
-      globeMesh.rotation.y = globeAngle;
+      globe.rotation.y = globeAngle;
       atmosphereGroup.rotation.y = globeAngle;
       // clouds, wind, weatherOverlay, cloudShadow are now children of globe
       // so they rotate automatically — no manual sync needed
