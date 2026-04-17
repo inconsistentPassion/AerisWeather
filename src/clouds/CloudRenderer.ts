@@ -158,4 +158,12 @@ export class CloudRenderer {
 
     return texture;
   }
+
+  setVisible(visible: boolean): void {
+    this.mesh.visible = visible;
+  }
+
+  onResize(): void {
+    // No-op for simplified renderer
+  }
 }
