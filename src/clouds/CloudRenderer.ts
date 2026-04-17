@@ -13,6 +13,7 @@ import type { WeatherManager } from '../weather/WeatherManager';
 import { GLOBE_RADIUS } from '../scene/Globe';
 import cloudVertexShader from '../shaders/cloud.vert';
 import cloudFragmentShader from '../shaders/cloud.frag';
+import { generatePerlinWorley3D } from '../utils/Noise3D';
 
 export class CloudRenderer {
   private material: THREE.ShaderMaterial;
@@ -20,7 +21,7 @@ export class CloudRenderer {
   private renderTarget: THREE.WebGLRenderTarget;
   private cloudMapTexture: THREE.DataTexture | null = null;
 
-  private noiseTexture: THREE.DataTexture3D;
+  private noiseTexture: THREE.Data3DTexture;
 
   constructor(scene: THREE.Scene, private weather: WeatherManager) {
     // Generate 3D noise texture (128³ Perlin-Worley FBM)
@@ -96,7 +97,7 @@ export class CloudRenderer {
 
     if (this.cloudMapTexture) {
       // Update existing texture
-      const texData = this.cloudMapTexture.image.data as Float32Array;
+      const texData = this.cloudMapTexture.image.data as unknown as Float32Array;
       for (let i = 0; i < data.length && i < texData.length / 4; i++) {
         texData[i * 4] = data[i];     // R = coverage
         texData[i * 4 + 1] = 0.5;     // G = humidity (placeholder)
@@ -135,31 +136,14 @@ export class CloudRenderer {
   }
 
   /**
-   * Generate a 3D Perlin-Worley noise texture.
-   * TODO: Replace with proper FBM generation.
+   * Generate a 3D Perlin-Worley noise texture for volumetric clouds.
    */
-  private generateNoise3D(size: number): THREE.DataTexture3D {
-    const data = new Float32Array(size * size * size);
+  private generateNoise3D(size: number): THREE.Data3DTexture {
+    const rawData = generatePerlinWorley3D(size);
+    // Copy to ensure ArrayBuffer compatibility
+    const data = new Float32Array(rawData);
 
-    for (let z = 0; z < size; z++) {
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          const idx = z * size * size + y * size + x;
-
-          // Simple 3D noise (placeholder — real impl uses Perlin-Worley FBM)
-          const nx = x / size * 8;
-          const ny = y / size * 8;
-          const nz = z / size * 8;
-          const n = (Math.sin(nx * 2.1 + ny * 1.3 + nz * 0.7) * 0.5 + 0.5) *
-                    (Math.cos(ny * 1.7 - nz * 2.3 + nx * 0.9) * 0.5 + 0.5) *
-                    (Math.sin(nz * 3.1 + nx * 0.5) * 0.5 + 0.5);
-
-          data[idx] = n;
-        }
-      }
-    }
-
-    const texture = new THREE.DataTexture3D(data, size, size, size);
+    const texture = new THREE.Data3DTexture(data, size, size, size);
     texture.format = THREE.RedFormat;
     texture.type = THREE.FloatType;
     texture.minFilter = THREE.LinearFilter;

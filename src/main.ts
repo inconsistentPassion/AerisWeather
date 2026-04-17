@@ -7,10 +7,12 @@ import { createScene } from './scene/Scene';
 import { createGlobe } from './scene/Globe';
 import { createAtmosphere } from './scene/Atmosphere';
 import { createCamera } from './scene/Camera';
+import { createSkybox } from './scene/Skybox';
 import { WeatherManager } from './weather/WeatherManager';
 import { CloudRenderer } from './clouds/CloudRenderer';
 import { WindParticles } from './wind/WindParticles';
 import { createUI } from './ui/UI';
+import * as THREE from 'three';
 
 async function init() {
   const container = document.getElementById('app')!;
@@ -19,13 +21,25 @@ async function init() {
   // Core scene
   const { renderer, scene } = createScene(container);
 
+  // Starfield skybox
+  const stars = createSkybox();
+  scene.add(stars);
+
   // Globe
   const globe = createGlobe();
   scene.add(globe);
 
-  // Atmosphere shell
-  const atmosphere = createAtmosphere();
-  scene.add(atmosphere);
+  // Atmosphere shell (Group with main + inner meshes)
+  const atmosphereGroup = createAtmosphere();
+  scene.add(atmosphereGroup);
+
+  // Collect atmosphere shader materials for uniform updates
+  const atmosphereMaterials: THREE.ShaderMaterial[] = [];
+  atmosphereGroup.traverse((child) => {
+    if (child instanceof THREE.Mesh && child.material instanceof THREE.ShaderMaterial) {
+      atmosphereMaterials.push(child.material);
+    }
+  });
 
   // Camera (orbit + free-flight)
   const camera = createCamera(container);
@@ -60,6 +74,13 @@ async function init() {
     weather.update(dt);
     clouds.update(dt, camera);
     wind.update(dt, camera);
+
+    // Update atmosphere uniforms with current camera position
+    for (const mat of atmosphereMaterials) {
+      if (mat.uniforms.uCameraPosition) {
+        mat.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
+      }
+    }
 
     renderer.render(scene, camera.threeCamera);
   }
