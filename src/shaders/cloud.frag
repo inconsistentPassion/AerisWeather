@@ -93,23 +93,41 @@ float sampleNoiseOctave(vec3 pos, float scale, float speed) {
   return texture(uNoiseTex, uv).r;
 }
 
-// Three-octave noise: large structure + medium detail + fine detail
+// Sample all 4 channels of the noise texture at a given scale
+vec4 sampleNoiseChannels(vec3 pos, float scale) {
+  vec3 uv = pos * scale + vec3(
+    uTime * uWindVelocity.x * 0.001,
+    0.0,
+    uTime * uWindVelocity.y * 0.001
+  );
+  uv = fract(uv);
+  return texture(uNoiseTex, uv);
+}
+
+// Multi-channel noise: uses R for base, G for detail, B for erosion
 float sampleNoise3D(vec3 worldPos) {
-  // Large-scale cloud structure
-  float n1 = sampleNoiseOctave(worldPos, 0.0003, 0.0008);
+  // Sample at large scale — base cloud shape (R channel)
+  vec4 largeNoise = sampleNoiseChannels(worldPos, 0.0003);
+  float base = largeNoise.r; // Perlin-Worley combined
 
-  // Medium detail (adds billowy appearance)
-  float n2 = sampleNoiseOctave(worldPos, 0.0012, 0.0015);
+  // Sample at medium scale — billowy detail (R channel, different scale)
+  vec4 medNoise = sampleNoiseChannels(worldPos, 0.001);
+  float medium = medNoise.r;
 
-  // Fine detail (erosion, makes edges ragged)
-  float n3 = sampleNoiseOctave(worldPos, 0.005, 0.003);
+  // Sample detail noise — fine erosion (G channel = detail Perlin FBM)
+  vec4 detailNoise = sampleNoiseChannels(worldPos, 0.004);
+  float detail = detailNoise.g; // Detail Perlin FBM
 
-  // Combine: base shape eroded by detail
-  float base = n1 * 0.6 + n2 * 0.3;
-  float detail = n3;
+  // Worley erosion — sharpens edges (B channel = Worley FBM)
+  float erosion = detailNoise.b;
 
-  // Use detail to erode base (creates cloud-like edge breakup)
-  return base * (0.6 + 0.4 * detail);
+  // Combine: base shape + medium detail, eroded by worley
+  float shape = base * 0.5 + medium * 0.3 + detail * 0.2;
+
+  // Erode edges using worley noise
+  shape *= (0.6 + 0.4 * erosion);
+
+  return shape;
 }
 
 // --- Height profiles ---

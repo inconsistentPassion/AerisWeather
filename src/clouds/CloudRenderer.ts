@@ -13,7 +13,7 @@ import type { WeatherManager } from '../weather/WeatherManager';
 import { GLOBE_RADIUS } from '../scene/Globe';
 import cloudVertexShader from '../shaders/cloud.vert';
 import cloudFragmentShader from '../shaders/cloud.frag';
-import { generatePerlinWorley3D } from '../utils/Noise3D';
+import { generatePerlinWorley3D, generateNoise3DChannel } from '../utils/Noise3D';
 
 export class CloudRenderer {
   private material: THREE.ShaderMaterial;
@@ -246,14 +246,18 @@ export class CloudRenderer {
   }
 
   /**
-   * Generate a 3D Perlin-Worley noise texture for volumetric clouds.
+   * Generate a multi-channel 3D noise texture for volumetric clouds.
+   * R = Perlin-Worley combined (base shape)
+   * G = Detail Perlin FBM (fine structure)
+   * B = Worley FBM (erosion)
+   * A = Height gradient
    */
   private generateNoise3D(size: number): THREE.Data3DTexture {
-    const rawData = generatePerlinWorley3D(size);
+    const rawData = generateNoise3DChannel(size);
     const data = new Float32Array(rawData);
 
     const texture = new THREE.Data3DTexture(data, size, size, size);
-    texture.format = THREE.RedFormat;
+    texture.format = THREE.RGBAFormat;
     texture.type = THREE.FloatType;
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
