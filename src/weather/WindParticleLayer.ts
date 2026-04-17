@@ -303,6 +303,7 @@ export class WindParticleLayer {
         this.ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${(ageAlpha * 0.9).toFixed(3)})`;
         this.ctx.fill();
       }
+    }
 
     /* replenish */
     const budget = Math.round(TOTAL_PARTICLES * 0.02);
