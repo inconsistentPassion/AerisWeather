@@ -10,6 +10,7 @@
     "server": "tsx watch server/index.ts"
   },
   "dependencies": {
+    "@types/geojson": "^7946.0.16",
     "@types/ws": "^8.18.1",
     "cors": "^2.8.5",
     "express": "^4.21.0",

@@ -10,10 +10,12 @@
 
 import * as THREE from 'three';
 import type { WeatherManager } from '../weather/WeatherManager';
-import { GLOBE_RADIUS } from '../scene/Globe';
 import cloudVertexShader from '../shaders/cloud.vert';
 import cloudFragmentShader from '../shaders/cloud.frag';
 import { generatePerlinWorley3D } from '../utils/Noise3D';
+
+// MapLibre uses meters (WGS84), not km
+const EARTH_RADIUS_M = 6371008.8;
 
 // Reusable temp vector for world position calculation
 const _worldPos = new THREE.Vector3();
@@ -39,9 +41,9 @@ export class CloudRenderer {
         uCloudMap: { value: this.cloudMapTexture },
         uNoiseTex: { value: this.noiseTexture },
         uPlanetCenter: { value: new THREE.Vector3(0, 0, 0) },
-        uPlanetRadius: { value: GLOBE_RADIUS },
-        uCloudBase: { value: GLOBE_RADIUS * 1.002 },
-        uCloudTop: { value: GLOBE_RADIUS * 1.012 },
+        uPlanetRadius: { value: EARTH_RADIUS_M },
+        uCloudBase: { value: EARTH_RADIUS_M * 1.002 },
+        uCloudTop: { value: EARTH_RADIUS_M * 1.012 },
         uTime: { value: 0 },
         uCameraPosition: { value: new THREE.Vector3() },
         uSunDirection: { value: new THREE.Vector3(0.6, 0.8, -0.4).normalize() },
@@ -58,7 +60,7 @@ export class CloudRenderer {
     });
 
     // Cloud shell geometry — slightly larger than globe
-    const cloudRadius = GLOBE_RADIUS * 1.015;
+    const cloudRadius = EARTH_RADIUS_M * 1.015;
     const geometry = new THREE.SphereGeometry(cloudRadius, 128, 128);
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.name = 'clouds';
@@ -78,10 +80,16 @@ export class CloudRenderer {
     if (!active) return; // skip shader updates when not visible
 
     this.material.uniforms.uTime.value += dt;
-    this.material.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
 
-    // Sync planet center with globe's world position
-    // (critical since cloud mesh is a child of the globe)
+    // Camera position — use the actual camera world position
+    // (correctly extracted from MapLibre's VP matrix in CloudLayer)
+    if (camera.threeCamera) {
+      this.material.uniforms.uCameraPosition.value.copy(camera.threeCamera.position);
+    }
+
+    // Planet center = cloud mesh's world position
+    // When cloudParent is at origin, this is (0,0,0)
+    // When cloud is child of globe (Three.js mode), this tracks globe position
     this.mesh.getWorldPosition(_worldPos);
     this.material.uniforms.uPlanetCenter.value.copy(_worldPos);
 

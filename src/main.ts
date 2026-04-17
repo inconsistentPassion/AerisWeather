@@ -10,7 +10,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
-import { addWindLayer, setWindLayerVisible } from './weather/WindLayer';
+import { addWindLayer, setWindLayerVisible, updateWindArrows } from './weather/WindLayer';
 import { createCloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
@@ -63,8 +63,9 @@ async function init() {
 
   // ── Load weather data ──────────────────────────────────────────────
   await weather.loadInitial();
-  // Trigger wind arrow render after data loads
-  const { updateWindArrows } = await import('./weather/WindLayer');
+
+  // ── Update wind arrows after data is loaded ───────────────────────
+  // (source/layer already created by addWindLayer above)
   updateWindArrows(map, weather);
 
   // ── UI ─────────────────────────────────────────────────────────────

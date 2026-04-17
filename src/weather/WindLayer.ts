@@ -18,6 +18,11 @@ const GRID_STEP = 8;
 const ARROW_LEN = 2.5;
 
 export function addWindLayer(map: maplibregl.Map, weather: WeatherManager) {
+  // Guard: don't add twice
+  try {
+    if (map.getSource(SOURCE_ID)) return;
+  } catch { /* source doesn't exist */ }
+
   // Create empty source
   map.addSource(SOURCE_ID, {
     type: 'geojson',
@@ -46,9 +51,6 @@ export function addWindLayer(map: maplibregl.Map, weather: WeatherManager) {
     },
   });
 
-  // Initial update
-  updateWindArrows(map, weather);
-
   // Update on weather data changes
   weather.on('dataLoaded', () => updateWindArrows(map, weather));
   weather.on('levelChange', () => updateWindArrows(map, weather));
@@ -56,7 +58,10 @@ export function addWindLayer(map: maplibregl.Map, weather: WeatherManager) {
 
 export function updateWindArrows(map: maplibregl.Map, weather: WeatherManager) {
   const windField = weather.getWindField('surface');
-  if (!windField) return;
+  if (!windField) {
+    console.warn('[WindLayer] No wind field data available');
+    return;
+  }
 
   const { u, v } = windField;
   const gridW = 360;
@@ -107,19 +112,24 @@ export function updateWindArrows(map: maplibregl.Map, weather: WeatherManager) {
     }
   }
 
-  const source = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource;
-  if (source) {
-    source.setData({
-      type: 'FeatureCollection',
-      features,
-    });
+  // Safety: check source exists before updating
+  try {
+    const source = map.getSource(SOURCE_ID) as maplibregl.GeoJSONSource;
+    if (source) {
+      source.setData({
+        type: 'FeatureCollection',
+        features,
+      });
+    }
+  } catch (e) {
+    console.warn('[WindLayer] Failed to update source:', e);
   }
 }
 
 export function setWindLayerVisible(map: maplibregl.Map, visible: boolean) {
   try {
     map.setLayoutProperty(LAYER_ID, 'visibility', visible ? 'visible' : 'none');
-  } catch { /* layer may not exist */ }
+  } catch { /* layer may not exist yet */ }
 }
 
 function speedToColor(t: number): string {
