@@ -1,5 +1,7 @@
 /**
  * UI — Time slider, level selector, layer toggles, camera mode.
+ * 
+ * v2: Responsive layout, loading indicator, FPS counter, better styling.
  */
 
 import type { WeatherManager } from '../weather/WeatherManager';
@@ -16,39 +18,61 @@ interface UIActions {
 export function createUI(container: HTMLElement, weather: WeatherManager, actions: UIActions) {
   container.innerHTML = `
     <div class="aeris-ui">
-      <div class="ui-panel time-panel">
-        <label>Time</label>
-        <input type="range" id="time-slider" min="0" max="72" value="0" step="1" />
-        <span id="time-display">Now</span>
+      <!-- Loading overlay -->
+      <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <span>Loading weather data...</span>
       </div>
 
-      <div class="ui-panel level-panel">
-        <label>Level</label>
-        <div class="level-buttons">
-          <button class="level-btn active" data-level="surface">SFC</button>
-          <button class="level-btn" data-level="850hPa">850</button>
-          <button class="level-btn" data-level="500hPa">500</button>
-          <button class="level-btn" data-level="FL100">FL100</button>
-          <button class="level-btn" data-level="FL200">FL200</button>
-          <button class="level-btn" data-level="FL300">FL300</button>
+      <!-- Top bar: title + FPS -->
+      <div class="top-bar">
+        <div class="title">
+          <span class="title-icon">🌍</span>
+          <span class="title-text">AerisWeather</span>
         </div>
+        <div class="fps-counter" id="fps-counter">-- FPS</div>
       </div>
 
-      <div class="ui-panel layers-panel">
-        <label>Layers</label>
-        <div class="layer-toggles">
-          <button class="layer-btn active" data-layer="wind">💨 Wind</button>
-          <button class="layer-btn active" data-layer="clouds">☁️ Clouds</button>
-          <button class="layer-btn" data-layer="temperature">🌡️ Temp</button>
-          <button class="layer-btn" data-layer="pressure">📊 Pressure</button>
-          <button class="layer-btn" data-layer="humidity">💧 Humidity</button>
+      <!-- Bottom controls -->
+      <div class="bottom-controls">
+        <div class="ui-panel time-panel">
+          <label>Forecast</label>
+          <div class="time-row">
+            <input type="range" id="time-slider" min="0" max="72" value="0" step="3" />
+            <span id="time-display" class="time-value">Now</span>
+          </div>
         </div>
-      </div>
 
-      <div class="ui-panel camera-panel">
-        <label>Camera</label>
-        <button class="cam-btn active" data-mode="orbit">🌍 Orbit</button>
-        <button class="cam-btn" data-mode="freeflight">✈️ Free Flight</button>
+        <div class="ui-panel level-panel">
+          <label>Level</label>
+          <div class="level-buttons">
+            <button class="level-btn active" data-level="surface">SFC</button>
+            <button class="level-btn" data-level="850hPa">850</button>
+            <button class="level-btn" data-level="500hPa">500</button>
+            <button class="level-btn" data-level="FL100">FL100</button>
+            <button class="level-btn" data-level="FL200">FL200</button>
+            <button class="level-btn" data-level="FL300">FL300</button>
+          </div>
+        </div>
+
+        <div class="ui-panel layers-panel">
+          <label>Layers</label>
+          <div class="layer-toggles">
+            <button class="layer-btn active" data-layer="wind">💨 Wind</button>
+            <button class="layer-btn active" data-layer="clouds">☁️ Clouds</button>
+            <button class="layer-btn" data-layer="temperature">🌡️ Temp</button>
+            <button class="layer-btn" data-layer="pressure">📊 Pressure</button>
+            <button class="layer-btn" data-layer="humidity">💧 Humidity</button>
+          </div>
+        </div>
+
+        <div class="ui-panel camera-panel">
+          <label>Camera</label>
+          <div class="camera-buttons">
+            <button class="cam-btn active" data-mode="orbit">🌍 Orbit</button>
+            <button class="cam-btn" data-mode="freeflight">✈️ Free</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -57,81 +81,214 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
   const style = document.createElement('style');
   style.textContent = `
     .aeris-ui {
-      display: flex;
-      gap: 16px;
-      padding: 16px;
-      background: linear-gradient(transparent, rgba(0,0,0,0.7));
-      flex-wrap: wrap;
-      align-items: flex-end;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, -sans-serif;
       color: #e0e8f0;
       font-size: 13px;
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .aeris-ui > * { pointer-events: auto; }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 5, 15, 0.85);
+      z-index: 100;
+      transition: opacity 0.5s;
+      gap: 16px;
+      font-size: 16px;
+      color: #8ab4e8;
+    }
+    .loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(100, 160, 255, 0.2);
+      border-top-color: #4a90d9;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Top bar */
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      pointer-events: none;
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    }
+    .title-icon { font-size: 22px; }
+    .title-text {
+      background: linear-gradient(135deg, #8ab4e8, #c0d8f8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .fps-counter {
+      font-size: 11px;
+      font-family: 'SF Mono', 'Cascadia Code', monospace;
+      color: rgba(160, 190, 230, 0.5);
+      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    }
+
+    /* Bottom controls */
+    .bottom-controls {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      background: linear-gradient(transparent 0%, rgba(0,5,15,0.75) 30%);
+      flex-wrap: wrap;
+      align-items: flex-end;
+      margin-top: auto;
     }
     .ui-panel {
       background: rgba(10, 20, 40, 0.8);
       backdrop-filter: blur(12px);
-      border: 1px solid rgba(100, 140, 200, 0.2);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(100, 140, 200, 0.15);
       border-radius: 8px;
-      padding: 10px 14px;
+      padding: 8px 12px;
     }
     .ui-panel label {
       display: block;
-      font-size: 10px;
+      font-size: 9px;
       text-transform: uppercase;
       letter-spacing: 1.5px;
-      color: rgba(160, 190, 230, 0.6);
-      margin-bottom: 6px;
+      color: rgba(160, 190, 230, 0.5);
+      margin-bottom: 4px;
+    }
+
+    /* Time slider */
+    .time-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
     #time-slider {
-      width: 200px;
+      width: 160px;
       accent-color: #4a90d9;
+      height: 4px;
     }
-    #time-display {
-      margin-left: 8px;
+    .time-value {
       font-variant-numeric: tabular-nums;
       color: #8ab4e8;
+      font-size: 12px;
+      min-width: 40px;
     }
-    .level-buttons, .layer-toggles {
+
+    /* Buttons */
+    .level-buttons, .layer-toggles, .camera-buttons {
       display: flex;
-      gap: 4px;
+      gap: 3px;
       flex-wrap: wrap;
     }
     .level-btn, .layer-btn, .cam-btn {
-      background: rgba(40, 60, 100, 0.5);
-      border: 1px solid rgba(80, 120, 180, 0.3);
+      background: rgba(40, 60, 100, 0.4);
+      border: 1px solid rgba(80, 120, 180, 0.2);
       border-radius: 4px;
       color: #a0c0e0;
-      padding: 4px 10px;
+      padding: 4px 8px;
       cursor: pointer;
-      font-size: 12px;
+      font-size: 11px;
       transition: all 0.15s;
+      white-space: nowrap;
     }
     .level-btn:hover, .layer-btn:hover, .cam-btn:hover {
-      background: rgba(60, 90, 150, 0.6);
+      background: rgba(60, 90, 150, 0.5);
+      border-color: rgba(100, 150, 220, 0.3);
     }
     .level-btn.active, .cam-btn.active {
-      background: rgba(70, 130, 220, 0.6);
-      border-color: rgba(100, 160, 255, 0.5);
+      background: rgba(70, 130, 220, 0.5);
+      border-color: rgba(100, 160, 255, 0.4);
       color: #fff;
     }
     .layer-btn.active {
-      background: rgba(60, 160, 100, 0.5);
-      border-color: rgba(80, 200, 120, 0.4);
-      color: #fff;
+      background: rgba(60, 160, 100, 0.4);
+      border-color: rgba(80, 200, 120, 0.3);
+      color: #c0ffe0;
+    }
+
+    /* Responsive: stack vertically on narrow screens */
+    @media (max-width: 768px) {
+      .bottom-controls {
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px 12px;
+      }
+      .ui-panel { padding: 6px 10px; }
+      #time-slider { width: 100%; }
+      .time-row { width: 100%; }
+      .level-buttons, .layer-toggles, .camera-buttons {
+        width: 100%;
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .title { font-size: 14px; }
+      .title-icon { font-size: 18px; }
+      .level-btn, .layer-btn, .cam-btn {
+        padding: 3px 6px;
+        font-size: 10px;
+      }
     }
   `;
   document.head.appendChild(style);
 
   // --- Event wiring ---
 
+  // Loading overlay
+  const loadingOverlay = container.querySelector('#loading-overlay') as HTMLElement;
+  weather.on('dataLoaded', () => {
+    loadingOverlay.classList.add('hidden');
+  });
+  // Auto-hide after 3s if no data event
+  setTimeout(() => loadingOverlay.classList.add('hidden'), 3000);
+
+  // FPS counter
+  const fpsCounter = container.querySelector('#fps-counter')!;
+  let frameCount = 0;
+  let lastFpsTime = performance.now();
+  function updateFps() {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+      fpsCounter.textContent = `${frameCount} FPS`;
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+    requestAnimationFrame(updateFps);
+  }
+  updateFps();
+
   // Time slider
   const timeSlider = container.querySelector('#time-slider') as HTMLInputElement;
   const timeDisplay = container.querySelector('#time-display')!;
   timeSlider.addEventListener('input', () => {
     const hours = parseInt(timeSlider.value);
+    timeDisplay.textContent = hours === 0 ? 'Now' : `+${hours}h`;
     const now = new Date();
     now.setHours(now.getHours() + hours);
-    timeDisplay.textContent = hours === 0 ? 'Now' : `+${hours}h`;
     actions.onTimeChange(now.getTime());
   });
 
