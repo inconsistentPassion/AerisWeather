@@ -110,19 +110,26 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🌤️  AerisWeather server running on http://localhost:${PORT}`);
   console.log(`📊 API docs: http://localhost:${PORT}/api`);
   console.log(`❤️  Health: http://localhost:${PORT}/health`);
 });
 
+// Setup WebSocket for real-time updates
+import { setupWebSocket } from './ws';
+const wss = setupWebSocket(server);
+console.log(`🔌 WebSocket ready at ws://localhost:${PORT}/ws`);
+
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('[Server] Shutting down...');
+  wss.close();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('[Server] Interrupted, shutting down...');
+  wss.close();
   process.exit(0);
 });
