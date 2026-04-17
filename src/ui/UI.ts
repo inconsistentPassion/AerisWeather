@@ -20,7 +20,13 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
       <!-- Header -->
       <div class="ui-header">
         <div class="logo">⛅ AerisWeather</div>
-        <div class="fps-counter" id="fps-counter">-- FPS</div>
+        <div class="header-right">
+          <div class="loading-indicator" id="loading-indicator" style="display: none;">
+            <div class="spinner"></div>
+            <span>Loading...</span>
+          </div>
+          <div class="fps-counter" id="fps-counter">-- FPS</div>
+        </div>
       </div>
 
       <!-- Main controls panel -->
@@ -121,6 +127,32 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
       background: rgba(0, 5, 16, 0.5);
       padding: 4px 8px;
       border-radius: 4px;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .loading-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #8899aa;
+      background: rgba(0, 5, 16, 0.6);
+      padding: 4px 10px;
+      border-radius: 4px;
+    }
+    .spinner {
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(100, 180, 255, 0.3);
+      border-top-color: #6ab0ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
 
     /* Main panel */
@@ -381,6 +413,17 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
     requestAnimationFrame(updateFPS);
   }
   requestAnimationFrame(updateFPS);
+
+  // Loading state
+  const loadingEl = container.querySelector('#loading-indicator') as HTMLElement;
+  weather.on('loadingChange', (data: { loading: boolean }) => {
+    loadingEl.style.display = data.loading ? 'flex' : 'none';
+  });
+
+  // Initial loading check
+  if (weather.getLoading()) {
+    loadingEl.style.display = 'flex';
+  }
 
   return { container };
 }

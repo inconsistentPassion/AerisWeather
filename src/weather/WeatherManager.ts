@@ -2,7 +2,7 @@
  * WeatherManager — Central weather data pipeline.
  * Fetches from backend proxy, caches, interpolates, distributes to consumers.
  * 
- * v2: Integrates with AgentA's realistic weather generation via API.
+ * v3: Time interpolation, prefetching, loading states.
  */
 
 import type { WeatherLevel, WeatherLayer, WeatherGrid, TimeRange } from './types';
@@ -11,12 +11,19 @@ const DEFAULT_LEVELS: WeatherLevel[] = ['surface', '850hPa', '500hPa', 'FL100', 
 const DEFAULT_LAYERS: WeatherLayer[] = ['wind', 'temperature', 'pressure', 'humidity', 'clouds'];
 const API_BASE = 'http://localhost:3001';
 
+// Interpolation cache: holds current + next time steps
+interface TimeCacheEntry {
+  time: number;
+  grid: WeatherGrid;
+}
+
 export class WeatherManager {
   private grids: Map<string, WeatherGrid> = new Map();
+  private timeCache: Map<string, TimeCacheEntry[]> = new Map(); // level -> sorted entries
   private currentTime: number = Date.now();
   private currentLevel: WeatherLevel = 'surface';
   private activeLayers: Set<WeatherLayer> = new Set(['wind', 'clouds']);
-  private timeRange: TimeRange | null = null;
+  private isLoading: boolean = false;
   private fetchInterval: ReturnType<typeof setInterval> | null = null;
 
   // Event callbacks
@@ -26,21 +33,36 @@ export class WeatherManager {
    * Load initial weather data for the default view.
    */
   async loadInitial(): Promise<void> {
-    // Try to fetch from backend first
+    this.setLoading(true);
+    
     try {
-      const grid = await this.fetchGrid('surface', this.currentTime);
-      if (grid) {
-        this.grids.set('surface', grid);
-        this.emit('dataLoaded', { level: 'surface' });
-        return;
+      // Fetch current + future time steps for interpolation
+      const now = Date.now();
+      const steps = [now, now + 3 * 3600000, now + 6 * 3600000]; // now, +3h, +6h
+      
+      for (const time of steps) {
+        const grid = await this.fetchGrid('surface', time);
+        if (grid) {
+          this.addTimeCache('surface', time, grid);
+        }
       }
-    } catch (e) {
-      // Backend not available, fall back to local generation
+      
+      // Set current grid
+      const entries = this.timeCache.get('surface') || [];
+      if (entries.length > 0) {
+        this.grids.set('surface', entries[0].grid);
+        this.emit('dataLoaded', { level: 'surface' });
+      } else {
+        // Fallback
+        this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
+        this.emit('dataLoaded', { level: 'surface' });
+      }
+    } catch {
+      this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
+      this.emit('dataLoaded', { level: 'surface' });
     }
-
-    // Fallback: generate locally
-    this.grids.set('surface', this.generatePlaceholderGrid(360, 180));
-    this.emit('dataLoaded', { level: 'surface' });
+    
+    this.setLoading(false);
   }
 
   /**
@@ -53,9 +75,9 @@ export class WeatherManager {
       if (!res.ok) return null;
 
       const data = await res.json();
-      if (!data.grid) return null;
-
-      return this.parseApiGrid(data.grid);
+      
+      // Parse the response — server returns fields directly
+      return this.parseApiGrid(data);
     } catch {
       return null;
     }
@@ -64,39 +86,123 @@ export class WeatherManager {
   /**
    * Parse API response into WeatherGrid format.
    */
-  private parseApiGrid(apiGrid: any): WeatherGrid {
+  private parseApiGrid(data: any): WeatherGrid {
+    // Server returns: { width, height, fields: { cloudFraction, humidity, u, v, w, temperature } }
+    // Fields can be arrays (from JSON) or Float32Arrays
+    const parseField = (field: any): Float32Array | undefined => {
+      if (!field) return undefined;
+      if (field instanceof Float32Array) return field;
+      if (Array.isArray(field)) return new Float32Array(field);
+      return undefined;
+    };
+
     return {
-      width: apiGrid.width,
-      height: apiGrid.height,
+      width: data.width || 360,
+      height: data.height || 180,
       fields: {
-        cloudFraction: apiGrid.fields?.cloudFraction
-          ? new Float32Array(apiGrid.fields.cloudFraction)
-          : undefined,
-        humidity: apiGrid.fields?.humidity
-          ? new Float32Array(apiGrid.fields.humidity)
-          : undefined,
-        temperature: apiGrid.fields?.temperature
-          ? new Float32Array(apiGrid.fields.temperature)
-          : undefined,
-        u: apiGrid.fields?.u
-          ? new Float32Array(apiGrid.fields.u)
-          : undefined,
-        v: apiGrid.fields?.v
-          ? new Float32Array(apiGrid.fields.v)
-          : undefined,
-        w: apiGrid.fields?.w
-          ? new Float32Array(apiGrid.fields.w)
-          : undefined,
+        cloudFraction: parseField(data.fields?.cloudFraction),
+        humidity: parseField(data.fields?.humidity),
+        temperature: parseField(data.fields?.temperature),
+        u: parseField(data.fields?.u),
+        v: parseField(data.fields?.v),
+        w: parseField(data.fields?.w),
       },
     };
+  }
+
+  /**
+   * Add entry to time cache, keeping sorted by time.
+   */
+  private addTimeCache(level: string, time: number, grid: WeatherGrid): void {
+    if (!this.timeCache.has(level)) {
+      this.timeCache.set(level, []);
+    }
+    
+    const entries = this.timeCache.get(level)!;
+    
+    // Remove existing entry for this time
+    const existing = entries.findIndex(e => Math.abs(e.time - time) < 60000); // 1 min tolerance
+    if (existing >= 0) {
+      entries.splice(existing, 1);
+    }
+    
+    entries.push({ time, grid });
+    entries.sort((a, b) => a.time - b.time);
+    
+    // Keep max 10 entries per level
+    while (entries.length > 10) {
+      entries.shift();
+    }
+  }
+
+  /**
+   * Interpolate between two time steps.
+   */
+  private interpolateGrids(a: WeatherGrid, b: WeatherGrid, t: number): WeatherGrid {
+    const lerp = (x: number, y: number, t: number) => x + (y - x) * t;
+    
+    const interpField = (fa: Float32Array | undefined, fb: Float32Array | undefined): Float32Array | undefined => {
+      if (!fa || !fb) return fa || fb;
+      const result = new Float32Array(fa.length);
+      for (let i = 0; i < fa.length; i++) {
+        result[i] = lerp(fa[i], fb[i], t);
+      }
+      return result;
+    };
+
+    return {
+      width: a.width,
+      height: a.height,
+      fields: {
+        cloudFraction: interpField(a.fields.cloudFraction, b.fields.cloudFraction),
+        humidity: interpField(a.fields.humidity, b.fields.humidity),
+        temperature: interpField(a.fields.temperature, b.fields.temperature),
+        u: interpField(a.fields.u, b.fields.u),
+        v: interpField(a.fields.v, b.fields.v),
+        w: interpField(a.fields.w, b.fields.w),
+      },
+    };
+  }
+
+  /**
+   * Get interpolated grid for a specific time.
+   */
+  private getInterpolatedGrid(level: string, time: number): WeatherGrid | null {
+    const entries = this.timeCache.get(level);
+    if (!entries || entries.length === 0) return null;
+    
+    // Find surrounding entries
+    let before: TimeCacheEntry | null = null;
+    let after: TimeCacheEntry | null = null;
+    
+    for (const entry of entries) {
+      if (entry.time <= time) {
+        before = entry;
+      } else {
+        after = entry;
+        break;
+      }
+    }
+    
+    if (!before && !after) return null;
+    if (!before) return after!.grid;
+    if (!after) return before.grid;
+    if (before.time === after.time) return before.grid;
+    
+    // Interpolate
+    const t = (time - before.time) / (after.time - before.time);
+    return this.interpolateGrids(before.grid, after.grid, t);
   }
 
   /**
    * Update per frame — handles interpolation, pre-fetching, etc.
    */
   update(dt: number): void {
-    // TODO: Smooth interpolation between forecast times
-    // TODO: Pre-fetch adjacent time steps
+    // Interpolate current grid if we have time cache
+    const interpolated = this.getInterpolatedGrid(this.currentLevel, this.currentTime);
+    if (interpolated) {
+      this.grids.set(this.currentLevel, interpolated);
+    }
   }
 
   /**
@@ -126,21 +232,54 @@ export class WeatherManager {
   }
 
   /**
-   * Set the current forecast time. Fetches new data if needed.
+   * Get temperature field for overlay.
+   */
+  getTemperatureField(): Float32Array | null {
+    const grid = this.grids.get(this.currentLevel);
+    if (!grid) return null;
+    return grid.fields.temperature ?? null;
+  }
+
+  /**
+   * Get humidity field for overlay.
+   */
+  getHumidityField(): Float32Array | null {
+    const grid = this.grids.get(this.currentLevel);
+    if (!grid) return null;
+    return grid.fields.humidity ?? null;
+  }
+
+  /**
+   * Set the current forecast time. Prefetches adjacent steps.
    */
   async setTime(timestamp: number): Promise<void> {
     this.currentTime = timestamp;
     this.emit('timeChange', { time: timestamp });
 
-    // Fetch new data for the changed time
-    try {
-      const grid = await this.fetchGrid(this.currentLevel, timestamp);
-      if (grid) {
-        this.grids.set(this.currentLevel, grid);
-        this.emit('dataLoaded', { level: this.currentLevel });
+    // Check if we need to fetch new data
+    const entries = this.timeCache.get(this.currentLevel) || [];
+    const hasNearby = entries.some(e => Math.abs(e.time - timestamp) < 3600000); // 1h tolerance
+    
+    if (!hasNearby) {
+      this.setLoading(true);
+      
+      // Fetch current + adjacent time steps
+      const steps = [
+        timestamp - 3 * 3600000,
+        timestamp,
+        timestamp + 3 * 3600000,
+      ];
+      
+      for (const time of steps) {
+        if (time < Date.now() - 86400000) continue; // don't fetch too far in past
+        const grid = await this.fetchGrid(this.currentLevel, time);
+        if (grid) {
+          this.addTimeCache(this.currentLevel, time, grid);
+        }
       }
-    } catch {
-      // Silently fail, use cached data
+      
+      this.setLoading(false);
+      this.emit('dataLoaded', { level: this.currentLevel });
     }
   }
 
@@ -152,18 +291,25 @@ export class WeatherManager {
     this.emit('levelChange', { level });
 
     // Fetch if we don't have this level
-    if (!this.grids.has(level)) {
+    if (!this.timeCache.has(level) || this.timeCache.get(level)!.length === 0) {
+      this.setLoading(true);
+      
       try {
         const grid = await this.fetchGrid(level, this.currentTime);
         if (grid) {
+          this.addTimeCache(level, this.currentTime, grid);
           this.grids.set(level, grid);
+          this.emit('dataLoaded', { level });
+        } else {
+          this.grids.set(level, this.generatePlaceholderGrid(360, 180));
           this.emit('dataLoaded', { level });
         }
       } catch {
-        // Use placeholder
         this.grids.set(level, this.generatePlaceholderGrid(360, 180));
         this.emit('dataLoaded', { level });
       }
+      
+      this.setLoading(false);
     }
   }
 
@@ -184,6 +330,18 @@ export class WeatherManager {
    */
   isLayerActive(layer: WeatherLayer): boolean {
     return this.activeLayers.has(layer);
+  }
+
+  /**
+   * Check if data is currently loading.
+   */
+  getLoading(): boolean {
+    return this.isLoading;
+  }
+
+  private setLoading(loading: boolean): void {
+    this.isLoading = loading;
+    this.emit('loadingChange', { loading });
   }
 
   // --- Event system ---
@@ -207,6 +365,7 @@ export class WeatherManager {
     const size = width * height;
     const cloudFraction = new Float32Array(size);
     const humidity = new Float32Array(size);
+    const temperature = new Float32Array(size);
     const u = new Float32Array(size);
     const v = new Float32Array(size);
 
@@ -224,6 +383,7 @@ export class WeatherManager {
         const itcz = Math.exp(-lat * lat * 0.003) * 0.5;
         cloudFraction[idx] = (noise * 0.4 + itcz);
         humidity[idx] = 0.6 - Math.abs(lat) * 0.003 + noise * 0.1;
+        temperature[idx] = 20 - Math.abs(lat) * 0.5 + noise * 5;
 
         // Trade winds
         u[idx] = -Math.cos(lat * Math.PI / 180 * 2) * 10;
@@ -234,7 +394,7 @@ export class WeatherManager {
     return {
       width,
       height,
-      fields: { cloudFraction, humidity, u, v },
+      fields: { cloudFraction, humidity, temperature, u, v },
     };
   }
 }
