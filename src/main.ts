@@ -51,7 +51,7 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Terrain elevation ───────────────────────────────────────────
+  // ── Terrain elevation (disabled — breaks canvas overlays) ───────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -59,9 +59,7 @@ async function init() {
       tileSize: 256,
       encoding: 'terrarium',
     });
-    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
-
-    // Hillshade for visual depth
+    // Hillshade only — no 3D terrain (would shift projection and break wind/cloud canvas)
     map.addLayer({
       id: 'hillshade',
       type: 'hillshade',
@@ -71,7 +69,7 @@ async function init() {
         'hillshade-exaggeration': 0.5,
       },
     });
-    console.log('[Terrain] Elevation enabled');
+    console.log('[Terrain] Hillshade enabled');
   } catch (e) {
     console.warn('[Terrain] Failed to load:', e);
   }
