@@ -11,8 +11,8 @@
 const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 
 // Grid resolution for sampling (degrees)
-// 2.5° = 144×72 = 10368 points → ~42 API calls of 25 points each
-const SAMPLE_STEP = 2.5;
+// 10° = 36×18 = 648 points → ~26 API calls of 25 points each
+const SAMPLE_STEP = 10;
 
 // Maximum coordinates per API call
 const MAX_PER_CALL = 25;
@@ -93,6 +93,10 @@ export async function fetchRealWeatherGrid(): Promise<{
       const batchData = await fetchBatch(batch);
       if (batchData) {
         allData.push(...batchData);
+      }
+      // Small delay between batches to avoid rate limiting
+      if (i + MAX_PER_CALL < points.length) {
+        await new Promise(r => setTimeout(r, 50));
       }
     }
 

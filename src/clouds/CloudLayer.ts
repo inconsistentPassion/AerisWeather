@@ -23,7 +23,7 @@ export class CloudLayer {
     Object.assign(this.canvas.style, {
       position: 'absolute', top: '0', left: '0',
       width: '100%', height: '100%',
-      pointerEvents: 'none', zIndex: '1',
+      pointerEvents: 'none', zIndex: '0',
     });
     map.getContainer().appendChild(this.canvas);
     this.ctx = this.canvas.getContext('2d', { alpha: true })!;

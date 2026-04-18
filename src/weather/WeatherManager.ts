@@ -38,7 +38,11 @@ export class WeatherManager {
     
     try {
       // Priority 1: Real data from Open-Meteo (free, no key, global)
-      const realGrid = await fetchRealWeatherGrid();
+      // Timeout after 10s to avoid blocking UI
+      const realGrid = await Promise.race([
+        fetchRealWeatherGrid(),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 10000)),
+      ]);
       if (realGrid) {
         this.grids.set('surface', realGrid);
         this.addTimeCache('surface', Date.now(), realGrid);
