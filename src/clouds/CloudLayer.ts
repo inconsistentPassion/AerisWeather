@@ -1,11 +1,15 @@
 /**
- * CloudLayer — Smooth cloud cover from Open-Meteo data.
- * Renders cloud fraction as semi-transparent white overlay with
- * soft edges via per-cell alpha blending.
+ * CloudLayer — Global cloud/precipitation from RainViewer tiles + Open-Meteo data overlay.
+ *
+ * RainViewer provides free, no-auth, global radar/satellite tiles as PNGs.
+ * One API call gets the latest frame URL, then tiles load like any MapLibre raster layer.
+ * Updates every 10 minutes.
  */
 
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
+
+const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 
 export class CloudLayer {
   private map: maplibregl.Map;
@@ -14,11 +18,14 @@ export class CloudLayer {
   private ctx: CanvasRenderingContext2D;
   private animId: number | null = null;
   private resizeObs: ResizeObserver;
+  private tileSourceAdded = false;
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(map: maplibregl.Map, weather: WeatherManager) {
     this.map = map;
     this.weather = weather;
 
+    // Canvas overlay for data-driven clouds (Open-Meteo fallback)
     this.canvas = document.createElement('canvas');
     Object.assign(this.canvas.style, {
       position: 'absolute', top: '0', left: '0',
@@ -32,8 +39,9 @@ export class CloudLayer {
     this.resizeObs.observe(map.getContainer());
     this.resize();
 
-    map.on('move', () => this.clear());
-    this.start();
+    // Fetch RainViewer tiles
+    this.loadRainViewerTiles();
+    this.refreshTimer = setInterval(() => this.loadRainViewerTiles(), 10 * 60 * 1000);
   }
 
   private resize(): void {
@@ -49,27 +57,79 @@ export class CloudLayer {
     this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
   }
 
-  private isFrontSide(lon: number, lat: number): boolean {
-    const c = this.map.getCenter();
-    const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
-    const pLat = lat * Math.PI / 180;
-    const pLon = lon * Math.PI / 180;
-    return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
+  /** Fetch latest RainViewer frame and add as MapLibre raster tiles */
+  private async loadRainViewerTiles(): Promise<void> {
+    try {
+      const res = await fetch(RAINDVIEWER_API);
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const host = data.host || 'https://tilecache.rainviewer.com';
+      const past = data.radar?.past || [];
+
+      if (past.length === 0) {
+        console.log('[Clouds] RainViewer: no radar frames available');
+        return;
+      }
+
+      const latest = past[past.length - 1];
+      const tileUrl = `${host}${latest.path}/256/{z}/{x}/{y}/2/1_1.png`;
+
+      if (this.tileSourceAdded) {
+        // Update existing source with new tile URL
+        try {
+          const source = this.map.getSource('rainviewer-clouds') as maplibregl.RasterTileSource;
+          if (source) {
+            source.setTiles([tileUrl]);
+          }
+        } catch { /* source may not exist */ }
+      } else {
+        // Add new source + layer
+        try {
+          this.map.addSource('rainviewer-clouds', {
+            type: 'raster',
+            tiles: [tileUrl],
+            tileSize: 256,
+            minzoom: 1,
+            maxzoom: 10,
+            attribution: 'RainViewer',
+          });
+
+          this.map.addLayer({
+            id: 'rainviewer-clouds-layer',
+            type: 'raster',
+            source: 'rainviewer-clouds',
+            paint: {
+              'raster-opacity': 0.55,
+              'raster-fade-duration': 0,
+              'raster-hue-rotate': 0,
+            },
+          });
+
+          this.tileSourceAdded = true;
+          console.log('[Clouds] RainViewer tiles loaded:', latest.path);
+        } catch (e) {
+          console.warn('[Clouds] Failed to add RainViewer layer:', e);
+        }
+      }
+    } catch (e) {
+      console.warn('[Clouds] RainViewer fetch failed:', e);
+    }
   }
 
   start(): void {
-    if (this.animId !== null) return;
-    const tick = () => { this.animId = requestAnimationFrame(tick); this.frame(); };
-    this.animId = requestAnimationFrame(tick);
+    // No-op — tiles render via MapLibre, no animation loop needed
   }
 
   stop(): void {
-    if (this.animId !== null) { cancelAnimationFrame(this.animId); this.animId = null; }
+    if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
   }
 
   setVisible(v: boolean): void {
+    try {
+      this.map.setLayoutProperty('rainviewer-clouds-layer', 'visibility',
+        v ? 'visible' : 'none');
+    } catch { /* layer may not exist yet */ }
     this.canvas.style.display = v ? '' : 'none';
     if (v) this.clear();
   }
@@ -78,95 +138,9 @@ export class CloudLayer {
     this.stop();
     this.resizeObs.disconnect();
     this.canvas.remove();
-  }
-
-  private frame(): void {
-    if (this.canvas.style.display === 'none') return;
-    if (!this.weather.isLayerActive('clouds')) { this.clear(); return; }
-
-    const grid = this.weather.getGrid('surface');
-    if (!grid) return;
-
-    const dpr = devicePixelRatio;
-    const cw = this.canvas.width / dpr;
-    const ch = this.canvas.height / dpr;
-    this.ctx.clearRect(0, 0, cw, ch);
-
-    const { width, height, fields } = grid;
-    const cloudFrac = fields.cloudFraction;
-    if (!cloudFrac) return;
-
-    const bounds = this.map.getBounds();
-    const vpW = bounds.getWest();
-    const vpE = bounds.getEast();
-    const vpS = bounds.getSouth();
-    const vpN = bounds.getNorth();
-    const crossesDateLine = vpW > vpE;
-
-    // Sample every Nth cell for performance (don't draw all 64800 cells)
-    const stepX = Math.max(1, Math.floor(width / 180));   // ~2 cells per degree
-    const stepY = Math.max(1, Math.floor(height / 90));
-    const cellW = 360 / width;
-    const cellH = 180 / height;
-
-    for (let j = 0; j < height; j += stepY) {
-      for (let i = 0; i < width; i += stepX) {
-        // Average coverage in this block
-        let totalCov = 0;
-        let count = 0;
-        for (let dj = 0; dj < stepY && j + dj < height; dj++) {
-          for (let di = 0; di < stepX && i + di < width; di++) {
-            totalCov += cloudFrac[(j + dj) * width + (i + di)];
-            count++;
-          }
-        }
-        const coverage = totalCov / count;
-        if (coverage < 0.02) continue;
-
-        const lon = (i + stepX * 0.5) * cellW - 180;
-        const lat = 90 - (j + stepY * 0.5) * cellH;
-
-        // Viewport cull
-        let inView: boolean;
-        const margin = cellW * stepX;
-        if (crossesDateLine) {
-          inView = (lon >= vpW - margin) || (lon <= vpE + margin);
-        } else {
-          inView = lon >= vpW - margin && lon <= vpE + margin;
-        }
-        if (!inView || lat < vpS - margin || lat > vpN + margin) continue;
-        if (!this.isFrontSide(lon, lat)) continue;
-
-        // Project center point
-        const center = this.map.project([lon, lat] as any);
-
-        // Screen size of the cell block
-        const edgeLon = lon + stepX * cellW * 0.5;
-        const edgeLat = lat + stepY * cellH * 0.5;
-        if (!this.isFrontSide(edgeLon, edgeLat)) continue;
-
-        const edge = this.map.project([edgeLon, edgeLat] as any);
-        const radiusX = Math.abs(edge.x - center.x);
-        const radiusY = Math.abs(edge.y - center.y);
-
-        if (radiusX < 1 || radiusY < 1) continue;
-        if (radiusX > 400 || radiusY > 400) continue;
-
-        // Draw as soft radial gradient (cloud-like, not hard rectangle)
-        const alpha = coverage * 0.5;
-        const grad = this.ctx.createRadialGradient(
-          center.x, center.y, 0,
-          center.x, center.y, Math.max(radiusX, radiusY)
-        );
-        grad.addColorStop(0, `rgba(255,255,255,${alpha.toFixed(3)})`);
-        grad.addColorStop(0.6, `rgba(255,255,255,${(alpha * 0.5).toFixed(3)})`);
-        grad.addColorStop(1, `rgba(255,255,255,0)`);
-
-        this.ctx.beginPath();
-        this.ctx.ellipse(center.x, center.y, radiusX, radiusY, 0, 0, Math.PI * 2);
-        this.ctx.fillStyle = grad;
-        this.ctx.fill();
-      }
-    }
+    try {
+      if (this.map.getLayer('rainviewer-clouds-layer')) this.map.removeLayer('rainviewer-clouds-layer');
+      if (this.map.getSource('rainviewer-clouds')) this.map.removeSource('rainviewer-clouds');
+    } catch { /* cleanup */ }
   }
 }
