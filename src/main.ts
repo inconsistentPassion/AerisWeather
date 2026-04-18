@@ -3,7 +3,7 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Custom layers   → volumetric clouds, wind particles
+ * Custom layers   → wind particles, cloud overlay
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -14,6 +14,15 @@ import { WindParticleLayer } from './weather/WindParticleLayer';
 import { CloudLayer } from './clouds/CloudLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
+
+// NASA GIBS — global satellite cloud imagery (MODIS Terra, near-real-time)
+function getGibsUrl(): string {
+  // GIBS typically has data 1-2 days behind. Try yesterday.
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const dateStr = d.toISOString().slice(0, 10);
+  return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${dateStr}/GoogleMapsCompatible_Level9/{z}/{y}/{jpg}`;
+}
 
 async function init() {
   const container = document.getElementById('app')!;
@@ -51,11 +60,34 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Add weather layers ─────────────────────────────────────────────
-  // Animated wind particles (MapLibre circle layer — globe-correct)
-  const windParticles = new WindParticleLayer(map, weather);
+  // ── NASA GIBS satellite cloud imagery ──────────────────────────────
+  try {
+    map.addSource('gibs-clouds', {
+      type: 'raster',
+      tiles: [getGibsUrl()],
+      tileSize: 256,
+      minzoom: 1,
+      maxzoom: 9,
+      attribution: 'NASA GIBS',
+    });
 
-  // Volumetric clouds (canvas overlay — same approach as wind particles)
+    map.addLayer({
+      id: 'gibs-clouds-layer',
+      type: 'raster',
+      source: 'gibs-clouds',
+      paint: {
+        'raster-opacity': 0.6,
+        'raster-fade-duration': 0,
+      },
+    });
+
+    console.log('[Clouds] NASA GIBS satellite imagery loaded');
+  } catch (e) {
+    console.warn('[Clouds] GIBS load failed, using data-driven fallback:', e);
+  }
+
+  // ── Add weather layers ─────────────────────────────────────────────
+  const windParticles = new WindParticleLayer(map, weather);
   const cloudLayer = new CloudLayer(map, weather);
 
   // ── Load weather data ──────────────────────────────────────────────
@@ -74,6 +106,11 @@ async function init() {
           break;
         case 'clouds':
           cloudLayer.setVisible(active);
+          // Toggle satellite imagery
+          try {
+            map.setLayoutProperty('gibs-clouds-layer', 'visibility',
+              active ? 'visible' : 'none');
+          } catch { /* layer may not exist */ }
           break;
       }
     },

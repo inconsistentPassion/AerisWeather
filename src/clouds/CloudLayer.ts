@@ -8,7 +8,6 @@
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
-const GLOBE_RADIUS = 6371000;
 const GRID_RES = 4; // degrees per cell
 
 export class CloudLayer {
@@ -95,22 +94,15 @@ export class CloudLayer {
     this.noiseCtx.putImageData(img, 0, 0);
   }
 
-  /** Check if a globe point faces the camera */
+  /** Check if a globe point faces the camera (correct 3D dot product) */
   private isFrontSide(lon: number, lat: number): boolean {
-    const t = (this.map as any).transform;
-    if (!t) return true;
-
-    const camX = t.cameraX ?? 0;
-    const camY = t.cameraY ?? 0;
-    const camZ = t.cameraZ ?? (GLOBE_RADIUS * 3);
-
-    const lr = lon * Math.PI / 180;
-    const la = lat * Math.PI / 180;
-    const px = GLOBE_RADIUS * Math.cos(la) * Math.cos(lr);
-    const py = GLOBE_RADIUS * Math.cos(la) * Math.sin(lr);
-    const pz = GLOBE_RADIUS * Math.sin(la);
-
-    return px * camX + py * camY + pz * camZ > GLOBE_RADIUS * GLOBE_RADIUS * 0.15;
+    const c = this.map.getCenter();
+    const cLat = c.lat * Math.PI / 180;
+    const cLon = c.lng * Math.PI / 180;
+    const pLat = lat * Math.PI / 180;
+    const pLon = lon * Math.PI / 180;
+    return Math.sin(cLat) * Math.sin(pLat) +
+           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
   }
 
   start(): void {

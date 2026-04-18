@@ -10,9 +10,9 @@ import type { WeatherManager } from '../weather/WeatherManager';
 
 const TOTAL_PARTICLES = 50000;
 const MAX_DRAWN = 15000;
-const TRAIL_LEN = 8;
-const MAX_AGE = 180;
-const BASE_SPEED = 0.002;
+const TRAIL_LEN = 4;       // short dashes, not long streaks
+const MAX_AGE = 90;         // shorter lifetime = faster refresh
+const BASE_SPEED = 0.005;   // faster movement (~2.5x previous)
 
 // Speed bins for color-batched rendering
 const NUM_BINS = 8;
@@ -175,7 +175,7 @@ export class WindParticleLayer {
     const cw = this.canvas.width / dpr;
     const ch = this.canvas.height / dpr;
     this.ctx.globalCompositeOperation = 'destination-in';
-    this.ctx.fillStyle = 'rgba(0,0,0,0.90)';
+    this.ctx.fillStyle = 'rgba(0,0,0,0.96)';
     this.ctx.fillRect(0, 0, cw, ch);
     this.ctx.globalCompositeOperation = 'source-over';
 
