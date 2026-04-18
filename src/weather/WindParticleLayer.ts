@@ -14,8 +14,7 @@ const TOTAL_PARTICLES = 3000;
 const MAX_DRAWN = 1000;
 const TRAIL_LEN = 8;
 const MAX_AGE = 180;
-const SPEED_SCALE = 0.0004;  // degrees per m/s per frame — tuned for smooth Windy-like motion
-const MAX_WIND_CLAMP = 40;   // m/s — cap to prevent visual artifacts in extreme winds
+const BASE_SPEED = 0.002;  // base displacement per sqrt(m/s) per frame
 
 export class WindParticleLayer {
   private map: maplibregl.Map;
@@ -104,6 +103,26 @@ export class WindParticleLayer {
     this.canvas.remove();
   }
 
+  /* ── front-side check (dot product in 3D geographic space) ─── */
+
+  /**
+   * Check if a point is on the camera-facing hemisphere of the globe.
+   * Uses the dot product of 3D unit vectors — no coordinate mixing.
+   * A point is front-facing if it's on the same hemisphere as the map center.
+   */
+  private isFrontSide(lon: number, lat: number): boolean {
+    const center = this.map.getCenter();
+    const cLat = center.lat * Math.PI / 180;
+    const cLon = center.lng * Math.PI / 180;
+    const pLat = lat * Math.PI / 180;
+    const pLon = lon * Math.PI / 180;
+
+    // Dot product of two unit vectors on the sphere
+    const dot = Math.sin(cLat) * Math.sin(pLat) +
+                Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon);
+    return dot > 0;
+  }
+
   /* ── bilinear wind sample (date-line safe) ──────────────────── */
 
   private sampleWind(
@@ -117,9 +136,9 @@ export class WindParticleLayer {
     const y = ((90 - lat) / 180) * gh;     // continuous grid y
 
     const x0 = Math.floor(x) % gw;
-    const y0 = Math.max(0, Math.min(gh - 2, Math.floor(y)));
+    const y0 = Math.max(0, Math.min(gh - 1, Math.floor(y)));
     const x1 = (x0 + 1) % gw;             // wraps at date line
-    const y1 = y0 + 1;
+    const y1 = Math.min(gh - 1, y0 + 1);
 
     const fx = x - Math.floor(x);
     const fy = y - Math.floor(y);
@@ -181,14 +200,12 @@ export class WindParticleLayer {
       const wind = this.sampleWind(u, v, this.lon[i], this.lat[i], gw, gh);
       this.spd[i] = wind.speed;
 
-      /* advect — u/v already contain speed magnitude, don't multiply by speed again */
+      /* advect — sqrt scaling for smooth visual speed across all wind strengths */
       if (wind.speed >= 0.3) {
         const cosLat = Math.max(0.3, Math.cos(this.lat[i] * Math.PI / 180));
-        // Clamp extreme winds to prevent unrealistic particle velocities
-        const uClamped = Math.abs(wind.u) > MAX_WIND_CLAMP ? Math.sign(wind.u) * MAX_WIND_CLAMP : wind.u;
-        const vClamped = Math.abs(wind.v) > MAX_WIND_CLAMP ? Math.sign(wind.v) * MAX_WIND_CLAMP : wind.v;
-        this.lon[i] += uClamped * SPEED_SCALE / cosLat;
-        this.lat[i] += vClamped * SPEED_SCALE;
+        const speedFactor = Math.sqrt(wind.speed);
+        this.lon[i] += (wind.u / wind.speed) * speedFactor * BASE_SPEED / cosLat;
+        this.lat[i] += (wind.v / wind.speed) * speedFactor * BASE_SPEED;
         if (this.lon[i] > 180) this.lon[i] -= 360;
         if (this.lon[i] < -180) this.lon[i] += 360;
         this.lat[i] = Math.max(-85, Math.min(85, this.lat[i]));
@@ -206,20 +223,19 @@ export class WindParticleLayer {
 
       let inView: boolean;
       if (crossesDateLine) {
-        // viewport spans date line: visible = lon >= west OR lon <= east
         inView = (this.lon[i] >= vpW - 2) || (this.lon[i] <= vpE + 2);
       } else {
         inView = this.lon[i] >= vpW - 2 && this.lon[i] <= vpE + 2;
       }
       if (!inView) continue;
       if (this.lat[i] < vpS - 2 || this.lat[i] > vpN + 2) continue;
+      if (!this.isFrontSide(this.lon[i], this.lat[i])) continue;
 
       /* add to visible set (keep fastest when full) */
       if (visCount < MAX_DRAWN) {
         this.visibleIdx[visCount] = i;
         visCount++;
       } else {
-        // find slowest in set and replace if this is faster
         let slowest = 0;
         let slowestSpd = Infinity;
         for (let s = 0; s < MAX_DRAWN; s++) {
@@ -254,12 +270,10 @@ export class WindParticleLayer {
         const tl = this.trailLon[b + slot];
         const tla = this.trailLat[b + slot];
         const p = this.map.project([tl, tla] as any);
-        // Screen bounds check — back-facing points project to mirrored positions
-        // and get caught by the distance-skip below
         pts.push([p.x, p.y]);
       }
 
-      /* trail segments — skip if trail not yet filled (prevents ghost lines to origin) */
+      /* trail segments — skip if trail not yet filled */
       const trailReady = this.age[i] >= TRAIL_LEN;
       if (trailReady) {
         this.ctx.lineWidth = Math.min(2.5, 0.8 + s * 0.06);
@@ -267,7 +281,7 @@ export class WindParticleLayer {
         this.ctx.lineJoin = 'round';
 
         for (let t = 0; t < TRAIL_LEN - 1; t++) {
-          // skip segments with implausibly long jumps (antimeridian / reset / back-face artifacts)
+          // skip segments with implausibly long jumps (antimeridian / reset / back-face)
           const dx = pts[t + 1][0] - pts[t][0];
           const dy = pts[t + 1][1] - pts[t][1];
           if (dx * dx + dy * dy > 200 * 200) continue;

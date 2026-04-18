@@ -132,39 +132,51 @@ export class WindParticles {
       const z = this.positions[i3 + 2];
       const r = Math.sqrt(x * x + y * y + z * z);
 
-      const lat = Math.asin(y / r);
+      const lat = Math.asin(Math.max(-1, Math.min(1, y / r)));
       const lon = Math.atan2(z, x);
 
-      // Sample wind field at nearest grid cell
-      const ui = Math.floor(((lon / Math.PI + 1) * 0.5) * (gridW - 1));
-      const vj = Math.floor(((lat / (Math.PI / 2) + 1) * 0.5) * (gridH - 1));
-      const gridIdx = Math.max(0, Math.min(gridH - 1, vj)) * gridW +
-                      Math.max(0, Math.min(gridW - 1, ui));
+      // Bilinear interpolated wind sample (date-line safe)
+      const normLon = ((lon + Math.PI) / (2 * Math.PI)) * gridW;
+      const normLat = ((Math.PI / 2 - lat) / Math.PI) * gridH;
 
-      const windU = u[gridIdx] || 0;
-      const windV = v[gridIdx] || 0;
+      const x0 = Math.floor(normLon) % gridW;
+      const y0 = Math.max(0, Math.min(gridH - 1, Math.floor(normLat)));
+      const x1 = (x0 + 1) % gridW;
+      const y1 = Math.min(gridH - 1, y0 + 1);
+      const fx = normLon - Math.floor(normLon);
+      const fy = normLat - Math.floor(normLat);
+
+      const idx00 = y0 * gridW + x0;
+      const idx01 = y0 * gridW + x1;
+      const idx10 = y1 * gridW + x0;
+      const idx11 = y1 * gridW + x1;
+
+      const windU = u[idx00] * (1-fx) * (1-fy) + u[idx01] * fx * (1-fy) +
+                    u[idx10] * (1-fx) * fy + u[idx11] * fx * fy;
+      const windV = v[idx00] * (1-fx) * (1-fy) + v[idx01] * fx * (1-fy) +
+                    v[idx10] * (1-fx) * fy + v[idx11] * fx * fy;
       const windSpeed = Math.sqrt(windU * windU + windV * windV);
       this.speeds[i] = windSpeed;
 
       // Convert wind to position delta on sphere
-      // u/v already contain speed magnitude — don't multiply by speed again
-      const SPEED_SCALE = 0.0004 * dt;
-      const MAX_WIND = 40;
-      const uC = Math.abs(windU) > MAX_WIND ? Math.sign(windU) * MAX_WIND : windU;
-      const vC = Math.abs(windV) > MAX_WIND ? Math.sign(windV) * MAX_WIND : windV;
-      const dLon = uC * SPEED_SCALE / Math.max(0.3, Math.cos(lat));
-      const dLat = vC * SPEED_SCALE;
+      // Normalize direction, scale by sqrt(speed) for smooth visual range
+      const BASE_SPEED = 0.002 * dt;
+      if (windSpeed >= 0.3) {
+        const speedFactor = Math.sqrt(windSpeed);
+        const dLon = (windU / windSpeed) * speedFactor * BASE_SPEED / Math.max(0.3, Math.cos(lat));
+        const dLat = (windV / windSpeed) * speedFactor * BASE_SPEED;
 
-      const newLon = lon + dLon;
-      const newLat = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, lat + dLat));
+        const newLon = lon + dLon;
+        const newLat = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, lat + dLat));
 
-      // Push trail (shift old positions, write current to head)
-      this.pushTrail(i, newLat, newLon, GLOBE_SURFACE);
+        // Push trail (shift old positions, write current to head)
+        this.pushTrail(i, newLat, newLon, GLOBE_SURFACE);
 
-      // Update current position
-      this.positions[i3] = GLOBE_SURFACE * Math.cos(newLat) * Math.cos(newLon);
-      this.positions[i3 + 1] = GLOBE_SURFACE * Math.sin(newLat);
-      this.positions[i3 + 2] = GLOBE_SURFACE * Math.cos(newLat) * Math.sin(newLon);
+        // Update current position
+        this.positions[i3] = GLOBE_SURFACE * Math.cos(newLat) * Math.cos(newLon);
+        this.positions[i3 + 1] = GLOBE_SURFACE * Math.sin(newLat);
+        this.positions[i3 + 2] = GLOBE_SURFACE * Math.cos(newLat) * Math.sin(newLon);
+      }
     }
 
     // Rebuild line geometry from trails
