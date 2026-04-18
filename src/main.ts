@@ -51,6 +51,31 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
+  // ── Terrain elevation ───────────────────────────────────────────
+  try {
+    map.addSource('terrain-dem', {
+      type: 'raster-dem',
+      tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      encoding: 'terrarium',
+    });
+    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+
+    // Hillshade for visual depth
+    map.addLayer({
+      id: 'hillshade',
+      type: 'hillshade',
+      source: 'terrain-dem',
+      paint: {
+        'hillshade-illumination-direction': 315,
+        'hillshade-exaggeration': 0.5,
+      },
+    });
+    console.log('[Terrain] Elevation enabled');
+  } catch (e) {
+    console.warn('[Terrain] Failed to load:', e);
+  }
+
   // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const cloudLayer = new CloudLayer(map, weather);
