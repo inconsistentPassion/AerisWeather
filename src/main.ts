@@ -51,14 +51,11 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Add weather layers ─────────────────────────────────────────────
+  // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const cloudLayer = new CloudLayer(map, weather);
 
-  // ── Load weather data ──────────────────────────────────────────────
-  await weather.loadInitial();
-
-  // ── UI ─────────────────────────────────────────────────────────────
+  // ── UI immediately ─────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
     onTimeChange: (t) => weather.setTime(t),
     onLevelChange: (l) => weather.setLevel(l),
@@ -82,6 +79,9 @@ async function init() {
       }
     },
   });
+
+  // ── Fetch weather data in background (non-blocking) ────────────
+  weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
   let autoRotate = false;
