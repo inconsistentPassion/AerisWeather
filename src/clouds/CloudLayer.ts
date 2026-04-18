@@ -1,6 +1,7 @@
 /**
- * CloudLayer — Cloud cover overlay from Open-Meteo weather data.
- * Renders cloud fraction as semi-transparent white cells on the globe.
+ * CloudLayer — Smooth cloud cover from Open-Meteo data.
+ * Renders cloud fraction as semi-transparent white overlay with
+ * soft edges via per-cell alpha blending.
  */
 
 import maplibregl from 'maplibre-gl';
@@ -48,7 +49,6 @@ export class CloudLayer {
     this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
   }
 
-  /** Check if a globe point faces the camera */
   private isFrontSide(lon: number, lat: number): boolean {
     const c = this.map.getCenter();
     const cLat = c.lat * Math.PI / 180;
@@ -103,61 +103,68 @@ export class CloudLayer {
     const vpN = bounds.getNorth();
     const crossesDateLine = vpW > vpE;
 
+    // Sample every Nth cell for performance (don't draw all 64800 cells)
+    const stepX = Math.max(1, Math.floor(width / 180));   // ~2 cells per degree
+    const stepY = Math.max(1, Math.floor(height / 90));
     const cellW = 360 / width;
     const cellH = 180 / height;
 
-    for (let j = 0; j < height; j++) {
-      for (let i = 0; i < width; i++) {
-        const idx = j * width + i;
-        const coverage = cloudFrac[idx];
-        if (coverage < 0.05) continue;
+    for (let j = 0; j < height; j += stepY) {
+      for (let i = 0; i < width; i += stepX) {
+        // Average coverage in this block
+        let totalCov = 0;
+        let count = 0;
+        for (let dj = 0; dj < stepY && j + dj < height; dj++) {
+          for (let di = 0; di < stepX && i + di < width; di++) {
+            totalCov += cloudFrac[(j + dj) * width + (i + di)];
+            count++;
+          }
+        }
+        const coverage = totalCov / count;
+        if (coverage < 0.02) continue;
 
-        const lon = (i + 0.5) * cellW - 180;
-        const lat = 90 - (j + 0.5) * cellH;
+        const lon = (i + stepX * 0.5) * cellW - 180;
+        const lat = 90 - (j + stepY * 0.5) * cellH;
 
         // Viewport cull
         let inView: boolean;
+        const margin = cellW * stepX;
         if (crossesDateLine) {
-          inView = (lon >= vpW - 5) || (lon <= vpE + 5);
+          inView = (lon >= vpW - margin) || (lon <= vpE + margin);
         } else {
-          inView = lon >= vpW - 5 && lon <= vpE + 5;
+          inView = lon >= vpW - margin && lon <= vpE + margin;
         }
-        if (!inView || lat < vpS - 5 || lat > vpN + 5) continue;
+        if (!inView || lat < vpS - margin || lat > vpN + margin) continue;
         if (!this.isFrontSide(lon, lat)) continue;
 
-        // Project cell corners
-        const hw = cellW * 0.6;
-        const hh = cellH * 0.6;
-        const corners: [number, number][] = [
-          [lon - hw, lat - hh], [lon + hw, lat - hh],
-          [lon + hw, lat + hh], [lon - hw, lat + hh],
-        ];
+        // Project center point
+        const center = this.map.project([lon, lat] as any);
 
-        let allValid = true;
-        const screenPts: [number, number][] = [];
-        for (const [clon, clat] of corners) {
-          if (!this.isFrontSide(clon, clat)) { allValid = false; break; }
-          const p = this.map.project([clon, clat] as any);
-          screenPts.push([p.x, p.y]);
-        }
-        if (!allValid || screenPts.length < 4) continue;
+        // Screen size of the cell block
+        const edgeLon = lon + stepX * cellW * 0.5;
+        const edgeLat = lat + stepY * cellH * 0.5;
+        if (!this.isFrontSide(edgeLon, edgeLat)) continue;
 
-        // Skip degenerate projections
-        const dx = screenPts[1][0] - screenPts[0][0];
-        const dy = screenPts[2][1] - screenPts[0][1];
-        if (Math.abs(dx) > 300 || Math.abs(dy) > 300) continue;
-        if (Math.abs(dx) < 1 || Math.abs(dy) < 1) continue;
+        const edge = this.map.project([edgeLon, edgeLat] as any);
+        const radiusX = Math.abs(edge.x - center.x);
+        const radiusY = Math.abs(edge.y - center.y);
 
-        // White cloud overlay — higher coverage = more opaque
-        const alpha = coverage * 0.45;
+        if (radiusX < 1 || radiusY < 1) continue;
+        if (radiusX > 400 || radiusY > 400) continue;
+
+        // Draw as soft radial gradient (cloud-like, not hard rectangle)
+        const alpha = coverage * 0.5;
+        const grad = this.ctx.createRadialGradient(
+          center.x, center.y, 0,
+          center.x, center.y, Math.max(radiusX, radiusY)
+        );
+        grad.addColorStop(0, `rgba(255,255,255,${alpha.toFixed(3)})`);
+        grad.addColorStop(0.6, `rgba(255,255,255,${(alpha * 0.5).toFixed(3)})`);
+        grad.addColorStop(1, `rgba(255,255,255,0)`);
 
         this.ctx.beginPath();
-        this.ctx.moveTo(screenPts[0][0], screenPts[0][1]);
-        for (let k = 1; k < screenPts.length; k++) {
-          this.ctx.lineTo(screenPts[k][0], screenPts[k][1]);
-        }
-        this.ctx.closePath();
-        this.ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
+        this.ctx.ellipse(center.x, center.y, radiusX, radiusY, 0, 0, Math.PI * 2);
+        this.ctx.fillStyle = grad;
         this.ctx.fill();
       }
     }

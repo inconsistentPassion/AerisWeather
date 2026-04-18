@@ -11,8 +11,8 @@
 const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 
 // Grid resolution for sampling (degrees)
-// 10° = 36×18 = 648 points → fits in ~25 API calls of 25 points each
-const SAMPLE_STEP = 10;
+// 2.5° = 144×72 = 10368 points → ~42 API calls of 25 points each
+const SAMPLE_STEP = 2.5;
 
 // Maximum coordinates per API call
 const MAX_PER_CALL = 25;
