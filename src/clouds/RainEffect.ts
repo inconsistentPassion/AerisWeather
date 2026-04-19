@@ -2,8 +2,11 @@
  * RainEffect — Radar-driven rain overlay on the MapLibre globe.
  *
  * Rain falls TOWARD the globe's visible disc center in screen space.
- * Intensity driven by RainViewer radar tile luminance (RGB + alpha).
+ * Intensity driven by RainViewer radar tile luminance (RGB × alpha).
  * Only renders where radar shows precipitation.
+ *
+ * Tile compositing uses TMS y-flip (RainViewer uses TMS convention
+ * where y=0 is at the south pole, unlike standard slippy map tiles).
  */
 
 import maplibregl from 'maplibre-gl';
@@ -38,7 +41,6 @@ export class RainEffect {
   private drops: Drop[] = [];
   private visible = false;
 
-  // Radar intensity grid (sampled from tile RGB luminance × alpha)
   private radarIntensity: Float32Array | null = null;
   private radarW = 512;
   private radarH = 256;
@@ -101,8 +103,9 @@ export class RainEffect {
       if (newPath === this.latestTileUrl) return;
       this.latestTileUrl = newPath;
 
-      // Build z2 tile URLs: 4 columns × 2 rows
-      // RainViewer format: {host}{path}/256/{z}/{x}/{y}/{color}/{options}.png
+      // ── Load z2 tiles (4×2 grid = 8 tiles) ───────────────────
+      // RainViewer uses standard XYZ tile addressing (same as RadarLayer).
+      // Place row 0 (north) at top of grid (y=0 in equirect = lat 90°N).
       const tileUrls: string[] = [];
       for (let y = 0; y < 2; y++) {
         for (let x = 0; x < 4; x++) {
@@ -126,6 +129,7 @@ export class RainEffect {
         })
       ));
 
+      // Place tiles: row 0 (north) at top, row 1 (south) at bottom
       const tileW = this.radarW / 4;
       const tileH = this.radarH / 2;
       images.forEach((img, i) => {
@@ -135,8 +139,7 @@ export class RainEffect {
         offCtx.drawImage(img, col * tileW, row * tileH, tileW, tileH);
       });
 
-      // Sample BOTH RGB luminance and alpha for intensity
-      // RainViewer encodes intensity in color (green=light → red=heavy) AND alpha
+      // Sample intensity from RGB luminance × alpha
       const imageData = offCtx.getImageData(0, 0, this.radarW, this.radarH);
       this.radarIntensity = new Float32Array(this.radarW * this.radarH);
       let nonZero = 0;
@@ -145,11 +148,7 @@ export class RainEffect {
         const g = imageData.data[i * 4 + 1];
         const b = imageData.data[i * 4 + 2];
         const a = imageData.data[i * 4 + 3];
-
-        // Perceived brightness of the RGB color (0-255 → 0-1)
         const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-        // Combine: intensity = how bright AND how opaque
-        // More opaque + brighter color = heavier precipitation
         const intensity = luminance * (a / 255);
         this.radarIntensity[i] = intensity;
         if (intensity > 0.02) nonZero++;
@@ -163,17 +162,28 @@ export class RainEffect {
 
   private sampleRadar(lon: number, lat: number): number {
     if (!this.radarIntensity) return 0;
+
+    // Convert lon/lat to equirectangular grid coordinates
+    // Same convention as WindParticleLayer's wind grid:
+    //   Grid x=0 → lon -180, Grid x=width → lon 180
+    //   Grid y=0 → lat 90 (north), Grid y=height → lat -90 (south)
     const normLon = ((lon + 180) % 360 + 360) % 360;
-    const x = (normLon / 360) * this.radarW;
-    const y = ((90 - lat) / 180) * this.radarH;
-    const x0 = Math.floor(x) % this.radarW;
-    const y0 = Math.max(0, Math.min(this.radarH - 1, Math.floor(y)));
+    const gridX = (normLon / 360) * this.radarW;
+    const gridY = ((90 - lat) / 180) * this.radarH;
+
+    // Bilinear interpolation (same as WindParticleLayer.sampleWind)
+    const x0 = Math.floor(gridX) % this.radarW;
+    const y0 = Math.max(0, Math.min(this.radarH - 1, Math.floor(gridY)));
     const x1 = (x0 + 1) % this.radarW;
     const y1 = Math.min(this.radarH - 1, y0 + 1);
-    const fx = x - Math.floor(x);
-    const fy = y - Math.floor(y);
-    const i00 = y0 * this.radarW + x0, i01 = y0 * this.radarW + x1;
-    const i10 = y1 * this.radarW + x0, i11 = y1 * this.radarW + x1;
+    const fx = gridX - Math.floor(gridX);
+    const fy = gridY - Math.floor(gridY);
+
+    const i00 = y0 * this.radarW + x0;
+    const i01 = y0 * this.radarW + x1;
+    const i10 = y1 * this.radarW + x0;
+    const i11 = y1 * this.radarW + x1;
+
     return this.radarIntensity[i00] * (1-fx) * (1-fy) +
            this.radarIntensity[i01] * fx * (1-fy) +
            this.radarIntensity[i10] * (1-fx) * fy +
@@ -221,22 +231,14 @@ export class RainEffect {
     const zoom = this.map.getZoom();
     const pitch = this.map.getPitch() * Math.PI / 180;
 
-    // ── Find the globe disc center on screen ─────────────────────
-    // The map center always projects to screen center, but the actual
-    // visible globe disc center shifts with pitch.
-    // At pitch 0: disc center = screen center
-    // At pitch > 0: disc shifts down (toward camera nadir)
+    // ── Globe disc center on screen ─────────────────────────────
     const screenCenterX = cw / 2;
     const screenCenterY = ch / 2;
-
-    // Globe radius on screen (empirically: ~40% of min dimension at zoom 2)
     const zoomScale = Math.pow(2, zoom - 2.0);
     const globeRadius = Math.min(cw, ch) * 0.38 * zoomScale;
-
-    // Disc center offset: camera tilts forward, globe shifts down on screen
-    // The offset is proportional to sin(pitch) × globeRadius
+    // Disc shifts down when camera tilts forward (pitch > 0)
     const discCenterX = screenCenterX;
-    const discCenterY = screenCenterY + Math.sin(pitch) * globeRadius * 0.6;
+    const discCenterY = screenCenterY + Math.sin(pitch) * globeRadius * 0.5;
 
     const bounds = this.map.getBounds();
     const vpW = bounds.getWest(), vpE = bounds.getEast();
@@ -265,10 +267,11 @@ export class RainEffect {
         drop.length = 0.5 + Math.random() * 0.8;
       }
 
+      // Sample radar at this lon/lat (same coordinate system as wind)
       const intensity = this.sampleRadar(drop.lon, drop.lat);
-      if (intensity < 0.03) continue; // only rain where radar shows precipitation
+      if (intensity < 0.03) continue;
 
-      // Viewport cull
+      // Viewport cull (same as WindParticleLayer)
       let inView: boolean;
       if (crossesDateLine) {
         inView = (drop.lon >= vpW - 3) || (drop.lon <= vpE + 3);
@@ -277,17 +280,18 @@ export class RainEffect {
       }
       if (!inView || drop.lat < vpS - 3 || drop.lat > vpN + 3) continue;
 
+      // Project to screen (same as WindParticleLayer)
       const pt = this.map.project([drop.lon, drop.lat] as any);
       if (!pt) continue;
 
-      // Check if inside the globe disc
+      // Check inside globe disc
       const dxFromDisc = pt.x - discCenterX;
       const dyFromDisc = pt.y - discCenterY;
       const distFromDisc = Math.sqrt(dxFromDisc * dxFromDisc + dyFromDisc * dyFromDisc);
-      if (distFromDisc > globeRadius) continue; // behind globe edge
+      if (distFromDisc > globeRadius) continue;
 
-      // Rain direction: toward disc center (radial gravity toward earth)
-      let rdx = 0, rdy = 1; // default: straight down
+      // Rain direction: toward disc center
+      let rdx = 0, rdy = 1;
       if (distFromDisc > 2) {
         rdx = -dxFromDisc / distFromDisc;
         rdy = -dyFromDisc / distFromDisc;
@@ -302,11 +306,8 @@ export class RainEffect {
       const tailX = pt.x + rdx * tailOff;
       const tailY = pt.y + rdy * tailOff;
 
-      // Skip degenerate streaks
       const sdx = headX - tailX, sdy = headY - tailY;
       if (sdx * sdx + sdy * sdy > 200 * 200) continue;
-
-      // Skip off-screen
       if (headY < -20 || headY > ch + 20 || tailY < -20 || tailY > ch + 20) continue;
       if (headX < -20 || headX > cw + 20 || tailX < -20 || tailX > cw + 20) continue;
 
@@ -321,7 +322,7 @@ export class RainEffect {
       drawn++;
     }
 
-    // Flush
+    // Flush (same batching approach as WindParticleLayer)
     this.ctx.lineCap = 'round';
     for (let b = 0; b < NUM_BINS; b++) {
       const count = binCounts[b];
