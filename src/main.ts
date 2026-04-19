@@ -207,13 +207,10 @@ async function init() {
   weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
-  let autoRotate = true;
-
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
       case 'Space':
         e.preventDefault();
-        autoRotate = !autoRotate;
         break;
       case 'KeyR':
         map.flyTo({ center: [0, 20], zoom: 1.8, pitch: 52, bearing: -20, duration: 1500 });
@@ -244,29 +241,6 @@ async function init() {
     }
   });
 
-  // ── Auto-rotation (Mapbox-style smooth bearing change) ─────────────
-  let rotationSpeed = 0.06; // Slower, more cinematic
-
-  function autoRotateTick() {
-    if (autoRotate) {
-      const currentBearing = map.getBearing();
-      map.setBearing(currentBearing + rotationSpeed);
-    }
-    requestAnimationFrame(autoRotateTick);
-  }
-  autoRotateTick();
-
-  // Pause rotation on interaction, resume after 4s (longer pause feels more natural)
-  let interactionTimer: ReturnType<typeof setTimeout> | null = null;
-  const pauseRotation = () => {
-    autoRotate = false;
-    if (interactionTimer) clearTimeout(interactionTimer);
-    interactionTimer = setTimeout(() => { autoRotate = true; }, 4000);
-  };
-  map.on('mousedown', pauseRotation);
-  map.on('touchstart', pauseRotation);
-  map.on('wheel', pauseRotation);
-  map.on('dragstart', pauseRotation);
 }
 
 init().catch(console.error);
