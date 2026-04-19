@@ -72,7 +72,7 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Terrain elevation (disabled — breaks canvas overlays) ───────
+  // ── 3D Terrain elevation ────────────────────────────────────────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -80,20 +80,20 @@ async function init() {
       tileSize: 256,
       encoding: 'terrarium',
     });
-    // Hillshade only — no 3D terrain (would shift projection and break wind/cloud canvas)
-    map.addLayer({
-      id: 'hillshade',
-      type: 'hillshade',
-      source: 'terrain-dem',
-      paint: {
-        'hillshade-illumination-direction': 315,
-        'hillshade-exaggeration': 0.5,
-      },
-    });
-    console.log('[Terrain] Hillshade enabled');
+    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+    console.log('[Terrain] 3D elevation enabled');
   } catch (e) {
     console.warn('[Terrain] Failed to load:', e);
   }
+
+  // ── Suppress RainViewer zoom errors ─────────────────────────────
+  map.on('error', (e) => {
+    const msg = e.error?.message || e.error?.toString() || '';
+    if (msg.includes('rainviewer') || msg.includes('zoom level')) {
+      return; // silently ignore — we handle zoom capping via transformRequest
+    }
+    console.error('MapLibre error:', e);
+  });
 
   // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
