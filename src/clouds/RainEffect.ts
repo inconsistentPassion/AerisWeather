@@ -182,34 +182,44 @@ export class RainEffect {
   // ── Occlusion ───────────────────────────────────────────────────────
 
   // ── Globe occlusion ──────────────────────────────────────────────────
-  // Great circle distance from map center (sub-camera point).
-  // Points > MAX_ANGLE degrees away are on the back hemisphere and hidden.
-
-  private static readonly MAX_ANGLE = 85 * Math.PI / 180;
-  private static readonly FADE_ANGLE = 75 * Math.PI / 180;
+  // Camera direction derived from MapLibre's globe transform:
+  // rotateY(lng) * rotateX(-lat) * rotateZ(-bearing) * rotateX(pitch) * [0,0,1]
+  // A surface point is visible when dot(cameraDir, surfaceNormal) > 0.
 
   /**
    * Globe visibility for a lat/lon point.
    * Returns 0 (behind globe) to 1 (front hemisphere).
    */
   private globeVisibility(lon: number, lat: number): number {
-    const c = this.map.getCenter();
-    const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
 
-    // Great circle distance via haversine
-    const dLat = pLat - cLat;
-    const dLon = pLon - cLon;
-    const a = Math.sin(dLat / 2) ** 2 +
-              Math.cos(cLat) * Math.cos(pLat) * Math.sin(dLon / 2) ** 2;
-    const angle = 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+    // Unit sphere surface normal at this point
+    const nx = Math.cos(pLat) * Math.cos(pLon);
+    const ny = Math.sin(pLat);
+    const nz = Math.cos(pLat) * Math.sin(pLon);
 
-    if (angle > RainEffect.MAX_ANGLE) return 0;
-    if (angle < RainEffect.FADE_ANGLE) return 1;
-    // Smooth fade at limb
-    const t = 1 - (angle - RainEffect.FADE_ANGLE) / (RainEffect.MAX_ANGLE - RainEffect.FADE_ANGLE);
+    // Camera direction: rotate [0,0,1] by pitch, bearing, lat, lng
+    const c = this.map.getCenter();
+    const cLat = c.lat * Math.PI / 180;
+    const cLon = c.lng * Math.PI / 180;
+    const bearing = this.map.getBearing() * Math.PI / 180;
+    const pitch = this.map.getPitch() * Math.PI / 180;
+
+    const cosB = Math.cos(bearing), sinB = Math.sin(bearing);
+    const sinLat = Math.sin(cLat), cosLat = Math.cos(cLat);
+    const sinLng = Math.sin(cLon), cosLng = Math.cos(cLon);
+    const sinP = Math.sin(pitch), cosP = Math.cos(pitch);
+
+    const camX = cosLng * (sinB * cosP + sinLat * sinP) - sinLng * cosLat * cosB;
+    const camY = -sinLat * sinB * cosP + cosLat * sinP;
+    const camZ = sinLng * (sinB * cosP + sinLat * sinP) + cosLng * cosLat * cosB;
+
+    const dot = camX * nx + camY * ny + camZ * nz;
+
+    if (dot <= 0) return 0;
+    if (dot >= 0.15) return 1;
+    const t = dot / 0.15;
     return t * t * (3 - 2 * t);
   }
 
