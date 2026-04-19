@@ -76,6 +76,26 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
+  // ── Sky + atmosphere (MapLibre v5 API) ─────────────────────────────
+  try {
+    (map as any).setSky({
+      'sky-color': '#1a2a4a',
+      'sky-horizon-blend': 0.5,
+      'atmosphere-blend': [
+        'interpolate', ['linear'], ['zoom'],
+        0, 1,
+        5, 0.5,
+        8, 0,
+      ],
+      'fog-color': '#0a0f1e',
+      'fog-ground-blend': 0.3,
+      'horizon-fog-blend': 0.4,
+    });
+    console.log('[Sky] Atmosphere enabled');
+  } catch (e) {
+    console.warn('[Sky] Failed:', e);
+  }
+
   // ── Custom atmosphere layer (Rayleigh scattering) ──────────────────
   try {
     const atmosphereLayer = createAtmosphereLayer();
