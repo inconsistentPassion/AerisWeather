@@ -280,10 +280,10 @@ export class RainEffect {
     const [px, py, pz, pw] = this._clipPlane;
     const dot = px * sx + py * sy + pz * sz + pw;
 
-    if (dot < 0) return 0;
-    if (dot > 0.08) return 1;
+    if (dot > 0) return 0;
+    if (dot < -0.08) return 1;
     // Smooth fade at limb
-    const t = dot / 0.08;
+    const t = -dot / 0.08;
     return t * t * (3 - 2 * t);
   }
 
