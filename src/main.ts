@@ -12,6 +12,7 @@ import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
+import { RainEffect } from './clouds/RainEffect';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -77,6 +78,11 @@ async function init() {
   // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const radarLayer = new RadarLayer(map, weather);
+  const rainEffect = new RainEffect(map, weather);
+
+  // Start radar + rain on init (they're on by default)
+  radarLayer.setVisible(true);
+  rainEffect.setVisible(true);
 
   // ── UI immediately ─────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -91,6 +97,7 @@ async function init() {
           break;
         case 'radar':
           radarLayer.setVisible(active);
+          rainEffect.setVisible(active);
           break;
       }
     },
