@@ -60,11 +60,11 @@ async function init() {
           const z = parseInt(match[1]);
           const x = parseInt(match[2]);
           const y = parseInt(match[3]);
-          if (z > 10) {
-            const scale = 1 << (z - 10);
+          if (z > 8) {
+            const scale = 1 << (z - 8);
             const cx = Math.floor(x / scale);
             const cy = Math.floor(y / scale);
-            const capped = url.replace(`/${z}/${x}/${y}.png`, `/10/${cx}/${cy}.png`);
+            const capped = url.replace(`/${z}/${x}/${y}.png`, `/8/${cx}/${cy}.png`);
             return { url: capped };
           }
         }
@@ -95,8 +95,6 @@ async function init() {
       console.warn('[Fog] Not supported in this MapLibre version:', e);
     }
   });
-
-  map.on('error', (e) => console.error('MapLibre error:', e));
 
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
@@ -159,10 +157,11 @@ async function init() {
     console.warn('[Terrain] Failed to load:', e);
   }
 
-  // ── Suppress RainViewer zoom errors ─────────────────────────────────
+  // ── Suppress tile errors (zoom not supported, 404s, etc.) ──────────
   map.on('error', (e) => {
     const msg = e.error?.message || e.error?.toString() || '';
-    if (msg.includes('rainviewer') || msg.includes('zoom level')) {
+    if (msg.includes('rainviewer') || msg.includes('zoom level') ||
+        msg.includes('404') || msg.includes('not supported')) {
       return;
     }
     console.error('MapLibre error:', e);

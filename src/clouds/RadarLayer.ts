@@ -17,7 +17,7 @@ import type { WeatherManager } from '../weather/WeatherManager';
 const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 const SOURCE_ID = 'rainviewer-radar';
 const LAYER_ID = 'rainviewer-radar-layer';
-const MAX_ZOOM = 10;
+const MAX_ZOOM = 8; // RainViewer tiles are best up to z8
 
 export class RadarLayer {
   private map: maplibregl.Map;
