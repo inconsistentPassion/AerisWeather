@@ -110,7 +110,7 @@ async function init() {
   // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const radarLayer = new RadarLayer(map, weather);
-  const rainEffect = new RainEffect(map, weather);
+  const rainEffect = new RainEffect(map);
 
   // Start radar + rain on init (they're on by default)
   radarLayer.setVisible(true);

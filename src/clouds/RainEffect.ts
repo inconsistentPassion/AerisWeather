@@ -1,38 +1,36 @@
 /**
- * RainEffect — Animated rain overlay on the globe.
+ * RainEffect — Rain overlay driven by actual RainViewer radar data.
  *
- * Rain falls PERPENDICULAR to the globe surface (toward center),
- * driven by precipitation data. Density scales with intensity.
+ * - Fetches RainViewer radar frame and samples tile colors for precipitation
+ * - Rain falls PERPENDICULAR to globe surface (world-space normal → screen projection)
+ * - Density scales with radar alpha intensity
  */
 
 import maplibregl from 'maplibre-gl';
-import type { WeatherManager } from '../weather/WeatherManager';
 
-const TOTAL_DROPS = 30000;
-const MAX_DRAWN = 15000;
+const TOTAL_DROPS = 8000;
+const MAX_DRAWN = 5000;
+const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 
-// Intensity bins for color-batched rendering
-const NUM_BINS = 5;
+// Intensity bins
+const NUM_BINS = 4;
 const BIN_COLORS: [number, number, number, number][] = [
-  [100, 140, 200, 0.15],  // 0: trace — barely visible
-  [120, 165, 220, 0.28],  // 1: light
-  [150, 195, 240, 0.38],  // 2: moderate
-  [180, 215, 250, 0.48],  // 3: heavy
-  [210, 235, 255, 0.58],  // 4: very heavy
+  [100, 140, 200, 0.18],  // 0: light
+  [140, 185, 235, 0.30],  // 2: moderate
+  [180, 215, 250, 0.42],  // 2: heavy
+  [220, 240, 255, 0.55],  // 3: very heavy
 ];
 
 interface Drop {
   lon: number;
   lat: number;
-  fall: number;      // 0–1 progress along streak
-  speed: number;     // fall speed
-  length: number;    // streak length multiplier
-  intensity: number; // 0–4 bin
+  fall: number;
+  speed: number;
+  length: number;
 }
 
 export class RainEffect {
   private map: maplibregl.Map;
-  private weather: WeatherManager;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private animId: number | null = null;
@@ -40,14 +38,15 @@ export class RainEffect {
   private drops: Drop[] = [];
   private visible = false;
 
-  // Precipitation grid
-  private precipGrid: Float32Array | null = null;
-  private precipW = 0;
-  private precipH = 0;
+  // Radar tile data — sampled from RainViewer
+  private radarAlpha: Float32Array | null = null;
+  private radarW = 512;
+  private radarH = 256;
+  private latestTileUrl = '';
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(map: maplibregl.Map, weather: WeatherManager) {
+  constructor(map: maplibregl.Map) {
     this.map = map;
-    this.weather = weather;
 
     this.canvas = document.createElement('canvas');
     Object.assign(this.canvas.style, {
@@ -66,12 +65,9 @@ export class RainEffect {
       this.drops.push(this.spawn());
     }
 
-    this.weather.on('dataLoaded', () => this.updatePrecipGrid());
-    this.weather.on('timeChange', () => this.updatePrecipGrid());
-    this.weather.on('levelChange', () => this.updatePrecipGrid());
-
-    // Try to populate immediately in case data is already loaded
-    this.updatePrecipGrid();
+    // Fetch radar data
+    this.loadRadarData();
+    this.refreshTimer = setInterval(() => this.loadRadarData(), 10 * 60 * 1000);
   }
 
   private resize(): void {
@@ -85,80 +81,134 @@ export class RainEffect {
   private spawn(): Drop {
     return {
       lon: (Math.random() - 0.5) * 360,
-      lat: (Math.random() - 0.5) * 160, // avoid extreme poles
+      lat: (Math.random() - 0.5) * 150,
       fall: Math.random(),
-      speed: 0.01 + Math.random() * 0.015,
-      length: 0.5 + Math.random() * 1.0,
-      intensity: 0,
+      speed: 0.012 + Math.random() * 0.018,
+      length: 0.6 + Math.random() * 0.8,
     };
   }
 
-  /** Build precipitation grid — cloudFraction is the primary driver */
-  private updatePrecipGrid(): void {
-    const grid = this.weather.getGrid('surface');
-    if (!grid) return;
+  /**
+   * Fetch RainViewer radar frame and decode a global tile into alpha values.
+   * Downloads a low-res composite tile and extracts the alpha channel as a
+   * 512×256 precipitation grid (lon × lat, equirectangular).
+   */
+  private async loadRadarData(): Promise<void> {
+    try {
+      const res = await fetch(RAINDVIEWER_API);
+      if (!res.ok) return;
+      const data = await res.json();
+      const host = data.host || 'https://tilecache.rainviewer.com';
+      const past = data.radar?.past || [];
+      if (past.length === 0) return;
 
-    const { width, height, fields } = grid;
-    this.precipW = width;
-    this.precipH = height;
-    this.precipGrid = new Float32Array(width * height);
+      const latest = past[past.length - 1];
+      const newPath = `${host}${latest.path}/256`;
+      if (newPath === this.latestTileUrl) return;
+      this.latestTileUrl = newPath;
 
-    for (let i = 0; i < width * height; i++) {
-      const cloud = fields.cloudFraction?.[i] ?? 0;  // 0–1
-      const humidity = (fields.humidity?.[i] ?? 50) / 100;  // 0–100 → 0–1
+      // Download a low-zoom tile that covers a large area.
+      // z2 = 4×4 tiles covering the whole world. We download the
+      // "whole world" approximation by fetching a few tiles and compositing.
+      // Simpler: use z1 (2×2 tiles). Each is 256×256.
+      // Even simpler: use the z0 tile (single 256×256 for the whole world).
+      // RainViewer might not have z0. Use z2 which covers 1/16 of the world per tile.
+      // Best: download multiple z2 tiles and composite into 512×256.
 
-      // Precipitation = cloud cover weighted by excess humidity
-      // Only thick clouds with high humidity produce rain
-      const humidityFactor = Math.max(0, (humidity - 0.55) * 2.2);
-      const precip = cloud * humidityFactor;
-      this.precipGrid[i] = Math.min(1, precip);
+      const tileUrls: string[] = [];
+      for (let y = 0; y < 2; y++) {
+        for (let x = 0; x < 4; x++) {
+          tileUrls.push(`${newPath}/2/{z}/{x}/{y}/2/1_1.png`
+            .replace('{z}', '2').replace('{x}', String(x)).replace('{y}', String(y)));
+        }
+      }
+
+      // Download all 8 tiles and composite into a 512×256 canvas
+      const offscreen = document.createElement('canvas');
+      offscreen.width = this.radarW;
+      offscreen.height = this.radarH;
+      const offCtx = offscreen.getContext('2d')!;
+      offCtx.clearRect(0, 0, this.radarW, this.radarH);
+
+      const images = await Promise.all(tileUrls.map(url =>
+        new Promise<HTMLImageElement | null>(resolve => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => resolve(img);
+          img.onerror = () => resolve(null);
+          img.src = url;
+        })
+      ));
+
+      // Place tiles: 4 columns × 2 rows, each 128×128 in our 512×256 canvas
+      const tileW = this.radarW / 4;
+      const tileH = this.radarH / 2;
+      images.forEach((img, i) => {
+        if (!img) return;
+        const col = i % 4;
+        const row = Math.floor(i / 4);
+        offCtx.drawImage(img, col * tileW, row * tileH, tileW, tileH);
+      });
+
+      // Extract alpha channel as precipitation intensity
+      const imageData = offCtx.getImageData(0, 0, this.radarW, this.radarH);
+      this.radarAlpha = new Float32Array(this.radarW * this.radarH);
+      for (let i = 0; i < this.radarW * this.radarH; i++) {
+        // Alpha is at index i*4 + 3
+        this.radarAlpha[i] = imageData.data[i * 4 + 3] / 255;
+      }
+
+      console.log('[Rain] Radar data loaded:', this.radarW + '×' + this.radarH);
+    } catch (e) {
+      console.warn('[Rain] Radar fetch failed:', e);
     }
   }
 
-  /** Bilinear sample precipitation */
-  private samplePrecip(lon: number, lat: number): number {
-    if (!this.precipGrid || this.precipW === 0) return 0;
-
+  /** Sample radar intensity at lon/lat (0–1, from alpha channel) */
+  private sampleRadar(lon: number, lat: number): number {
+    if (!this.radarAlpha) return 0;
     const normLon = ((lon + 180) % 360 + 360) % 360;
-    const x = (normLon / 360) * this.precipW;
-    const y = ((90 - lat) / 180) * this.precipH;
-    const x0 = Math.floor(x) % this.precipW;
-    const y0 = Math.max(0, Math.min(this.precipH - 1, Math.floor(y)));
-    const x1 = (x0 + 1) % this.precipW;
-    const y1 = Math.min(this.precipH - 1, y0 + 1);
+    const x = (normLon / 360) * this.radarW;
+    const y = ((90 - lat) / 180) * this.radarH;
+    const x0 = Math.floor(x) % this.radarW;
+    const y0 = Math.max(0, Math.min(this.radarH - 1, Math.floor(y)));
+    const x1 = (x0 + 1) % this.radarW;
+    const y1 = Math.min(this.radarH - 1, y0 + 1);
     const fx = x - Math.floor(x);
     const fy = y - Math.floor(y);
-
-    const i00 = y0 * this.precipW + x0, i01 = y0 * this.precipW + x1;
-    const i10 = y1 * this.precipW + x0, i11 = y1 * this.precipW + x1;
-
-    return this.precipGrid[i00] * (1 - fx) * (1 - fy) +
-           this.precipGrid[i01] * fx * (1 - fy) +
-           this.precipGrid[i10] * (1 - fx) * fy +
-           this.precipGrid[i11] * fx * fy;
+    const i00 = y0 * this.radarW + x0, i01 = y0 * this.radarW + x1;
+    const i10 = y1 * this.radarW + x0, i11 = y1 * this.radarW + x1;
+    return this.radarAlpha[i00] * (1 - fx) * (1 - fy) +
+           this.radarAlpha[i01] * fx * (1 - fy) +
+           this.radarAlpha[i10] * (1 - fx) * fy +
+           this.radarAlpha[i11] * fx * fy;
   }
 
-  /** Bilinear sample wind */
-  private sampleWind(lon: number, lat: number): { u: number; v: number } {
-    const wf = this.weather.getWindField('surface');
-    if (!wf) return { u: 0, v: 0 };
-    const { u, v } = wf;
-    const gw = 360, gh = 180;
-    const normLon = ((lon + 180) % 360 + 360) % 360;
-    const x = (normLon / 360) * gw;
-    const y = ((90 - lat) / 180) * gh;
-    const x0 = Math.floor(x) % gw;
-    const y0 = Math.max(0, Math.min(gh - 1, Math.floor(y)));
-    const x1 = (x0 + 1) % gw;
-    const y1 = Math.min(gh - 1, y0 + 1);
-    const fx = x - Math.floor(x);
-    const fy = y - Math.floor(y);
-    const i00 = y0 * gw + x0, i01 = y0 * gw + x1;
-    const i10 = y1 * gw + x0, i11 = y1 * gw + x1;
-    return {
-      u: u[i00] * (1 - fx) * (1 - fy) + u[i01] * fx * (1 - fy) + u[i10] * (1 - fx) * fy + u[i11] * fx * fy,
-      v: v[i00] * (1 - fx) * (1 - fy) + v[i01] * fx * (1 - fy) + v[i10] * (1 - fx) * fy + v[i11] * fx * fy,
-    };
+  /**
+   * Get rain direction in screen space — perpendicular to globe surface.
+   *
+   * Uses Mercator z coordinate to project a point below the surface.
+   * The screen-space vector from surface→below is the fall direction.
+   */
+  private getRainDirection(lon: number, lat: number): { dx: number; dy: number } | null {
+    // Access the internal transform for mercator→screen projection with altitude
+    const t = (this.map as any)._transform;
+    if (!t || !t.project) return null;
+
+    // Surface point (z = 0)
+    const surfMc = maplibregl.MercatorCoordinate.fromLngLat({ lng: lon, lat }, 0);
+    const surfScreen = t.project(surfMc);
+
+    // Point below surface (negative altitude = toward globe center = "down")
+    const belowMc = maplibregl.MercatorCoordinate.fromLngLat({ lng: lon, lat }, -1000);
+    const belowScreen = t.project(belowMc);
+
+    const dx = belowScreen.x - surfScreen.x;
+    const dy = belowScreen.y - surfScreen.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 0.3) return null;
+
+    return { dx: dx / len, dy: dy / len };
   }
 
   private isFrontSide(lon: number, lat: number): boolean {
@@ -169,30 +219,6 @@ export class RainEffect {
     const pLon = lon * Math.PI / 180;
     return Math.sin(cLat) * Math.sin(pLat) +
            Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
-  }
-
-  /**
-   * Get rain direction in screen space — toward globe center.
-   * "Perpendicular to surface" on a sphere = radial inward.
-   * Direction = from surface point toward map center in screen space.
-   */
-  private getRainDirection(lon: number, lat: number): { dx: number; dy: number } | null {
-    const pt = this.map.project([lon, lat] as any);
-    if (!pt) return null;
-
-    // Globe center in screen space = project the map center
-    const center = this.map.getCenter();
-    const centerPt = this.map.project([center.lng, center.lat] as any);
-    if (!centerPt) return null;
-
-    // Direction from surface point toward center = "down toward earth"
-    const dx = centerPt.x - pt.x;
-    const dy = centerPt.y - pt.y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-
-    if (len < 1) return null; // looking straight at the point
-
-    return { dx: dx / len, dy: dy / len };
   }
 
   start(): void {
@@ -215,6 +241,7 @@ export class RainEffect {
 
   destroy(): void {
     this.stop();
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.resizeObs.disconnect();
     this.canvas.remove();
   }
@@ -237,7 +264,6 @@ export class RainEffect {
     const vpS = bounds.getSouth(), vpN = bounds.getNorth();
     const crossesDateLine = vpW > vpE;
 
-    // Bin segments
     const binSegs: Float64Array[] = [];
     const binCounts = new Int32Array(NUM_BINS);
     const maxSegs = Math.ceil(MAX_DRAWN / NUM_BINS) * 4;
@@ -247,28 +273,23 @@ export class RainEffect {
 
     let drawn = 0;
     const zoom = this.map.getZoom();
-    const sizeScale = Math.max(0.4, Math.min(2.5, zoom / 4));
+    const sizeScale = Math.max(0.5, Math.min(2, zoom / 5));
 
     for (let i = 0; i < this.drops.length && drawn < MAX_DRAWN; i++) {
       const drop = this.drops[i];
 
-      // Advance fall
       drop.fall += drop.speed;
       if (drop.fall >= 1) {
-        // Respawn in a random location
         drop.lon = (Math.random() - 0.5) * 360;
-        drop.lat = (Math.random() - 0.5) * 160;
+        drop.lat = (Math.random() - 0.5) * 150;
         drop.fall = 0;
-        drop.speed = 0.01 + Math.random() * 0.015;
-        drop.length = 0.5 + Math.random() * 1.0;
+        drop.speed = 0.012 + Math.random() * 0.018;
+        drop.length = 0.6 + Math.random() * 0.8;
       }
 
-      // Sample precipitation
-      const precip = this.samplePrecip(drop.lon, drop.lat);
-      if (precip < 0.02) continue;
-
-      // Intensity bin
-      drop.intensity = Math.min(NUM_BINS - 1, Math.floor(precip * NUM_BINS));
+      // Sample radar intensity
+      const intensity = this.sampleRadar(drop.lon, drop.lat);
+      if (intensity < 0.05) continue; // skip no-precip areas
 
       // Viewport cull
       let inView: boolean;
@@ -284,48 +305,26 @@ export class RainEffect {
       const pt = this.map.project([drop.lon, drop.lat] as any);
       if (!pt) continue;
 
-      // Get perpendicular-to-surface direction (toward globe center)
-      const normal = this.getRainDirection(drop.lon, drop.lat);
-      if (!normal) continue;
+      // Perpendicular direction (toward globe center in screen space)
+      const dir = this.getRainDirection(drop.lon, drop.lat);
+      if (!dir) continue;
 
-      // Wind lean — shift rain direction slightly downwind
-      const wind = this.sampleWind(drop.lon, drop.lat);
-      const windStrength = Math.sqrt(wind.u * wind.u + wind.v * wind.v);
-      const windLean = Math.min(0.35, windStrength * 0.015);
+      // Streak: tail → head along the perpendicular direction
+      const streakLen = drop.length * sizeScale * 10;
+      const headOff = drop.fall * streakLen;
+      const tailOff = (drop.fall - 1) * streakLen;
 
-      // Pure perpendicular direction + wind lean
-      // normal points toward center (rain direction)
-      // Wind shifts it sideways
-      let dirX = normal.dx;
-      let dirY = normal.dy;
+      const headX = pt.x + dir.dx * headOff;
+      const headY = pt.y + dir.dy * headOff;
+      const tailX = pt.x + dir.dx * tailOff;
+      const tailY = pt.y + dir.dy * tailOff;
 
-      if (windStrength > 0.5) {
-        // Wind direction in screen space (approximate: east=right, south=down)
-        const windAngle = Math.atan2(wind.v, wind.u);
-        dirX += Math.cos(windAngle) * windLean;
-        dirY += Math.sin(windAngle) * windLean;
-        // Re-normalize
-        const len = Math.sqrt(dirX * dirX + dirY * dirY);
-        if (len > 0.01) { dirX /= len; dirY /= len; }
-      }
+      // Skip degenerate
+      const sdx = headX - tailX, sdy = headY - tailY;
+      if (sdx * sdx + sdy * sdy > 150 * 150) continue;
 
-      // Streak: tail (behind) → head (current fall position)
-      const streakLen = drop.length * sizeScale * 12;
-      const headOffset = drop.fall * streakLen;
-      const tailOffset = (drop.fall - 1) * streakLen;
-
-      const headX = pt.x + dirX * headOffset;
-      const headY = pt.y + dirY * headOffset;
-      const tailX = pt.x + dirX * tailOffset;
-      const tailY = pt.y + dirY * tailOffset;
-
-      // Skip degenerate/out-of-bounds segments
-      const dx = headX - tailX, dy = headY - tailY;
-      if (dx * dx + dy * dy > 200 * 200) continue;
-      if (headX < -50 || headX > cw + 50 || headY < -50 || headY > ch + 50) continue;
-
-      // Add to bin
-      const bin = drop.intensity;
+      // Intensity bin
+      const bin = Math.min(NUM_BINS - 1, Math.floor(intensity * NUM_BINS));
       const segs = binSegs[bin];
       let sc = binCounts[bin];
       if (sc >= maxSegs - 4) continue;
@@ -336,22 +335,19 @@ export class RainEffect {
       drawn++;
     }
 
-    // Flush: one stroke per intensity bin
+    // Flush
     this.ctx.lineCap = 'round';
-
     for (let b = 0; b < NUM_BINS; b++) {
       const count = binCounts[b];
       if (count === 0) continue;
-
       const segs = binSegs[b];
       const [r, g, bl, a] = BIN_COLORS[b];
-
       this.ctx.beginPath();
       for (let j = 0; j < count; j += 4) {
         this.ctx.moveTo(segs[j], segs[j + 1]);
         this.ctx.lineTo(segs[j + 2], segs[j + 3]);
       }
-      this.ctx.lineWidth = (0.8 + b * 0.4) * sizeScale;
+      this.ctx.lineWidth = (0.7 + b * 0.4) * sizeScale;
       this.ctx.strokeStyle = `rgba(${r},${g},${bl},${a})`;
       this.ctx.stroke();
     }
