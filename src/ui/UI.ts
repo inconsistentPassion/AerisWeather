@@ -46,7 +46,7 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
           <label>⏱ FORECAST</label>
           <div class="time-row">
             <button id="btn-play" class="icon-btn" title="Play/Pause (Space)">▶</button>
-            <input type="range" id="time-slider" min="0" max="120" value="0" step="1" />
+            <input type="range" id="time-slider" min="-6" max="120" value="0" step="1" />
             <span id="time-display" class="time-label">Now</span>
           </div>
         </div>
@@ -390,7 +390,7 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
     if (playing) {
       playInterval = setInterval(() => {
         const val = parseInt(timeSlider.value);
-        timeSlider.value = String(val >= 120 ? 0 : val + 1);
+        timeSlider.value = String(val >= 120 ? -6 : val + 1);
         updateTimeDisplay();
       }, 300);
     } else if (playInterval) {
@@ -404,7 +404,13 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
 
   function updateTimeDisplay() {
     const hours = parseInt(timeSlider.value);
-    timeDisplay.textContent = hours === 0 ? 'Now' : `+${hours}h`;
+    if (hours === 0) {
+      timeDisplay.textContent = 'Now';
+    } else if (hours > 0) {
+      timeDisplay.textContent = `+${hours}h`;
+    } else {
+      timeDisplay.textContent = `${hours}h`;
+    }
     const now = new Date();
     now.setHours(now.getHours() + hours);
     actions.onTimeChange(now.getTime());
