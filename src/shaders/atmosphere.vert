@@ -1,9 +1,7 @@
-// atmosphere.vert — Fullscreen quad vertex shader for MapLibre atmosphere layer
+// atmosphere.vert — Fullscreen quad vertex shader (GLSL 100 / WebGL 1 compatible)
 
-#version 300 es
-
-in vec2 aPosition;
-out vec2 vUV;
+attribute vec2 aPosition;
+varying vec2 vUV;
 
 void main() {
   vUV = aPosition * 0.5 + 0.5;

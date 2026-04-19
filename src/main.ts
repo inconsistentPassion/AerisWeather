@@ -64,45 +64,17 @@ async function init() {
     },
   });
 
-  // Globe projection (Mapbox-style)
+  // Globe projection
   map.on('style.load', () => {
     try {
       (map as any).setProjection({ type: 'globe' });
     } catch (e) {
       console.warn('setProjection failed:', e);
     }
-
-    // Add fog for depth effect
-    try {
-      (map as any).setFog({
-        color: 'rgb(10, 15, 30)',
-        'high-color': 'rgb(20, 30, 60)',
-        'horizon-blend': 0.08,
-        'space-color': 'rgb(2, 4, 10)',
-        'star-intensity': 0.35,
-      });
-      console.log('[Fog] Atmospheric fog enabled');
-    } catch (e) {
-      console.warn('[Fog] Not supported:', e);
-    }
   });
 
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
-
-  // ── Atmosphere sky ─────────────────────────────────────────────────
-  try {
-    (map as any).setSky({
-      'sky-type': 'atmosphere',
-      'sky-atmosphere-sun': [0.0, 0.0],
-      'sky-atmosphere-sun-intensity': 15,
-      'sky-atmosphere-color': 'rgb(35, 55, 100)',
-      'sky-atmosphere-halo-color': 'rgb(255, 200, 100)',
-    });
-    console.log('[Sky] Atmosphere glow enabled');
-  } catch (e) {
-    console.warn('[Sky] Failed:', e);
-  }
 
   // ── Custom atmosphere layer (Rayleigh scattering) ──────────────────
   try {
