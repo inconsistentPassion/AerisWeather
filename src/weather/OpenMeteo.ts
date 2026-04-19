@@ -11,14 +11,14 @@
 const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 
 // Grid resolution for sampling (degrees)
-// 10° = 36×18 = 648 points → ~26 API calls of 25 points each
-const SAMPLE_STEP = 10;
+// 20° = 10×18 = 180 points → ~8 API calls of 25 points each
+const SAMPLE_STEP = 20;
 
 // Maximum coordinates per API call
 const MAX_PER_CALL = 25;
 
-// Cache duration (15 minutes — Open-Meteo updates hourly)
-const CACHE_MS = 15 * 60 * 1000;
+// Cache duration (30 minutes — Open-Meteo updates hourly)
+const CACHE_MS = 30 * 60 * 1000;
 
 interface CachedGrid {
   timestamp: number;
@@ -93,30 +93,20 @@ export async function fetchRealWeatherGrid(): Promise<{
       const batch = points.slice(i, i + MAX_PER_CALL);
       const batchNum = Math.floor(i / MAX_PER_CALL) + 1;
 
-      // Retry with backoff on 429
-      let retries = 0;
-      let batchData = null;
-      while (retries < 3) {
-        console.log(`[OpenMeteo] Batch ${batchNum}/${totalBatches} (${batch.length} pts)${retries > 0 ? ` retry ${retries}` : ''}`);
-        batchData = await fetchBatch(batch);
-        if (batchData) break;
-
-        // Check if we got rate-limited — back off
-        retries++;
-        const backoff = 1000 * retries * retries; // 1s, 4s, 9s
-        console.warn(`[OpenMeteo] Batch ${batchNum} failed, waiting ${backoff}ms...`);
-        await new Promise(r => setTimeout(r, backoff));
-      }
+      // Single attempt — if 429, stop fetching more batches
+      console.log(`[OpenMeteo] Batch ${batchNum}/${totalBatches} (${batch.length} pts)`);
+      const batchData = await fetchBatch(batch);
 
       if (batchData) {
         allData.push(...batchData);
       } else {
-        console.warn(`[OpenMeteo] Batch ${batchNum} failed after 3 retries`);
+        console.warn(`[OpenMeteo] Batch ${batchNum} failed, stopping fetch`);
+        break; // Don't hammer the API — use whatever we got
       }
 
-      // Respect rate limits: 500ms between successful requests
+      // 2s between batches to stay well under rate limits
       if (i + MAX_PER_CALL < points.length) {
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
 

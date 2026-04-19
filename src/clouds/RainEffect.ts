@@ -310,6 +310,9 @@ export class RainEffect {
     this.globeCenter.x = cw / 2;
     this.globeCenter.y = ch / 2 + Math.sin(pitch) * this.globeRadius * 0.5;
 
+    // Guard against degenerate globe radius
+    if (this.globeRadius < 10) return;
+
     // Bin segments by intensity
     const binSegs: Float64Array[] = [];
     const binCounts = new Int32Array(NUM_BINS);

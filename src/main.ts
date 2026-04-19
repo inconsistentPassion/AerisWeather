@@ -133,12 +133,13 @@ async function init() {
     console.warn('[Terrain] Failed:', e);
   }
 
-  // ── Suppress non-critical tile errors ──────────────────────────────
+  // ── Suppress non-critical errors ─────────────────────────────────────
   map.on('error', (e) => {
     const msg = e.error?.message || e.error?.toString() || '';
     if (msg.includes('rainviewer') || msg.includes('zoom level') ||
-        msg.includes('404') || msg.includes('not supported')) {
-      return;
+        msg.includes('404') || msg.includes('not supported') ||
+        msg.includes('calculateFogMatrix') || msg.includes('fogMatrix')) {
+      return; // Globe projection doesn't support fog — expected
     }
     console.error('MapLibre error:', e);
   });
