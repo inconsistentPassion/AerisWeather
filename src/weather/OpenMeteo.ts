@@ -62,7 +62,7 @@ export async function fetchRealWeatherGrid(): Promise<{
     const lats: number[] = [];
     const lons: number[] = [];
 
-    for (let lat = -80; lat <= 80; lat += SAMPLE_STEP) {
+    for (let lat = -90; lat <= 90; lat += SAMPLE_STEP) {
       lats.push(lat);
     }
     for (let lon = -180; lon < 180; lon += SAMPLE_STEP) {
