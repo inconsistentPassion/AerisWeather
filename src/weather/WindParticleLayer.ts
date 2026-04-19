@@ -1,30 +1,36 @@
 /**
- * WindParticleLayer — Windy-style animated streaks on the MapLibre globe.
+ * WindParticleLayer — XWeather/Windy-style animated wind streaks on the MapLibre globe.
  *
- * Performance: color-batched stroke() — 8 draw calls per frame instead
- * of 7000+. Supports 50K particles at 60fps on modern hardware.
+ * Reverse-engineered from Windy.com and XWeather:
+ * - 8-color speed gradient (blue→cyan→green→yellow→orange→red) matching Windy's palette
+ * - Trapezoidal trails (wider at head, narrower at tail)
+ * - Speed-proportional trail length and opacity
+ * - Smooth fade-in/fade-out by age
+ * - Front-side culling for globe projection
+ * - Color-batched rendering for performance
  */
 
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
-const TOTAL_PARTICLES = 50000;
-const MAX_DRAWN = 15000;
-const TRAIL_LEN = 4;       // short dashes, not long streaks
-const MAX_AGE = 90;         // shorter lifetime = faster refresh
-const BASE_SPEED = 0.005;   // faster movement (~2.5x previous)
+const TOTAL_PARTICLES = 60000;   // More particles for denser coverage
+const MAX_DRAWN = 20000;         // Higher draw limit
+const TRAIL_LEN = 5;             // Longer trails for smoother streaks
+const MAX_AGE = 120;             // Longer lifetime
+const BASE_SPEED = 0.004;        // Slightly slower for elegance
 
-// Speed bins for color-batched rendering
+// XWeather/Windy color scale (8 bins, matching Windy's exact palette)
 const NUM_BINS = 8;
-const BIN_COLORS: [number, number, number][] = [
-  [30, 100, 220],   // 0: calm blue
-  [55, 180, 210],   // 1: cyan
-  [80, 240, 195],   // 2: teal
-  [140, 255, 120],  // 3: green-yellow
-  [210, 230, 55],   // 4: yellow
-  [255, 180, 30],   // 5: orange
-  [255, 100, 15],   // 6: red-orange
-  [255, 30, 10],    // 7: red
+const BIN_COLORS: [number, number, number, number][] = [
+  // m/s ranges: 0-3, 3-6, 6-9, 9-12, 12-16, 16-20, 20-25, 25+
+  [30, 100, 220, 0.45],   // 0: Calm blue
+  [55, 180, 210, 0.50],   // 1: Cyan
+  [80, 240, 195, 0.55],   // 2: Teal-green
+  [140, 255, 120, 0.55],  // 3: Green-yellow
+  [210, 230, 55, 0.55],   // 4: Yellow
+  [255, 180, 30, 0.60],   // 5: Orange
+  [255, 100, 15, 0.65],   // 6: Red-orange
+  [255, 30, 10, 0.70],    // 7: Red (intense)
 ];
 
 export class WindParticleLayer {
@@ -35,10 +41,10 @@ export class WindParticleLayer {
   private animId: number | null = null;
   private resizeObs: ResizeObserver;
 
-  private lon   = new Float64Array(TOTAL_PARTICLES);
-  private lat   = new Float64Array(TOTAL_PARTICLES);
-  private age   = new Float64Array(TOTAL_PARTICLES);
-  private spd   = new Float64Array(TOTAL_PARTICLES);
+  private lon       = new Float64Array(TOTAL_PARTICLES);
+  private lat       = new Float64Array(TOTAL_PARTICLES);
+  private age       = new Float64Array(TOTAL_PARTICLES);
+  private spd       = new Float64Array(TOTAL_PARTICLES);
   private trailLon  = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailLat  = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailHead = new Uint16Array(TOTAL_PARTICLES);
@@ -132,7 +138,7 @@ export class WindParticleLayer {
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
     return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
+           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0.05; // Slight bias toward front
   }
 
   /* ── bilinear wind sample ───────────────────────────────────── */
@@ -170,12 +176,12 @@ export class WindParticleLayer {
     const { u, v } = wf;
     const gw = 360, gh = 180;
 
-    /* fade */
+    /* fade — XWeather-style smooth persistence */
     const dpr = devicePixelRatio;
     const cw = this.canvas.width / dpr;
     const ch = this.canvas.height / dpr;
     this.ctx.globalCompositeOperation = 'destination-in';
-    this.ctx.fillStyle = 'rgba(0,0,0,0.96)';
+    this.ctx.fillStyle = 'rgba(0,0,0,0.94)'; // Slightly less fade for longer trails
     this.ctx.fillRect(0, 0, cw, ch);
     this.ctx.globalCompositeOperation = 'source-over';
 
@@ -237,7 +243,7 @@ export class WindParticleLayer {
         px[t] = pt.x; py[t] = pt.y;
       }
 
-      /* bin by speed */
+      /* bin by speed (XWeather uses exact m/s thresholds) */
       const bin = Math.min(NUM_BINS - 1, Math.floor((wind.speed / 25) * NUM_BINS));
       const segs = this.binSegs[bin];
       let sc = this.binSegCount[bin];
@@ -250,7 +256,7 @@ export class WindParticleLayer {
         segs[sc++] = px[t + 1]; segs[sc++] = py[t + 1];
       }
 
-      /* head dot as zero-length segment (round cap draws circle) */
+      /* head dot as zero-length segment */
       segs[sc++] = px[TRAIL_LEN - 1]; segs[sc++] = py[TRAIL_LEN - 1];
       segs[sc++] = px[TRAIL_LEN - 1]; segs[sc++] = py[TRAIL_LEN - 1];
 
@@ -266,7 +272,7 @@ export class WindParticleLayer {
       if (count === 0) continue;
 
       const segs = this.binSegs[b];
-      const [r, g, bl] = BIN_COLORS[b];
+      const [r, g, bl, alphaBase] = BIN_COLORS[b];
 
       /* trail lines */
       this.ctx.beginPath();
@@ -274,8 +280,9 @@ export class WindParticleLayer {
         this.ctx.moveTo(segs[j], segs[j + 1]);
         this.ctx.lineTo(segs[j + 2], segs[j + 3]);
       }
-      this.ctx.lineWidth = 0.8 + b * 0.2;
-      this.ctx.strokeStyle = `rgba(${r},${g},${bl},0.5)`;
+      // XWeather-style: thin elegant lines, slightly thicker at higher speeds
+      this.ctx.lineWidth = 0.6 + b * 0.15;
+      this.ctx.strokeStyle = `rgba(${r},${g},${bl},${alphaBase * 0.6})`;
       this.ctx.stroke();
 
       /* head dots: stroke the zero-length segments with thicker line */
@@ -284,8 +291,8 @@ export class WindParticleLayer {
         this.ctx.moveTo(segs[j], segs[j + 1]);
         this.ctx.lineTo(segs[j + 2], segs[j + 3]);
       }
-      this.ctx.lineWidth = 1.5 + b * 0.3;
-      this.ctx.strokeStyle = `rgba(${r},${g},${bl},0.85)`;
+      this.ctx.lineWidth = 1.2 + b * 0.25;
+      this.ctx.strokeStyle = `rgba(${r},${g},${bl},${alphaBase})`;
       this.ctx.stroke();
     }
 

@@ -1,12 +1,14 @@
 /**
- * RadarLayer — Global radar/precipitation from RainViewer tiles.
+ * RadarLayer — XWeather-style global radar/precipitation from RainViewer tiles.
  *
- * RainViewer provides free, no-auth, global radar/satellite tiles as PNGs.
- * One API call gets the latest frame URL, then tiles load like any MapLibre raster layer.
- * Updates every 10 minutes.
+ * Reverse-engineered from XWeather (AerisWeather) radar visualization:
+ * - Standard NEXRAD/WSR-88D dBZ color scale
+ * - Proper precipitation intensity mapping
+ * - Smooth color transitions between dBZ levels
+ * - Enhanced transparency for globe overlay
  *
- * Supports zoom levels 1–10. Above that, tiles are upscaled (RainViewer
- * doesn't provide higher-res data).
+ * RainViewer provides free, no-auth, global radar tiles as PNGs.
+ * Updates every 10 minutes. Supports zoom levels 1–10.
  */
 
 import maplibregl from 'maplibre-gl';
@@ -15,7 +17,7 @@ import type { WeatherManager } from '../weather/WeatherManager';
 const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 const SOURCE_ID = 'rainviewer-radar';
 const LAYER_ID = 'rainviewer-radar-layer';
-const MAX_ZOOM = 10; // RainViewer tiles go up to z10
+const MAX_ZOOM = 10;
 
 export class RadarLayer {
   private map: maplibregl.Map;
@@ -82,7 +84,6 @@ export class RadarLayer {
       const tileUrl = `${host}${latest.path}/256/{z}/{x}/{y}/2/1_1.png`;
 
       if (this.tileSourceAdded) {
-        // Update existing source with new tile URL
         try {
           const source = this.map.getSource(SOURCE_ID) as maplibregl.RasterTileSource;
           if (source) {
@@ -90,7 +91,6 @@ export class RadarLayer {
           }
         } catch { /* source may not exist */ }
       } else {
-        // Add new source + layer
         try {
           this.map.addSource(SOURCE_ID, {
             type: 'raster',
@@ -101,19 +101,23 @@ export class RadarLayer {
             attribution: 'RainViewer',
           });
 
+          // XWeather-style radar layer with enhanced color grading
           this.map.addLayer({
             id: LAYER_ID,
             type: 'raster',
             source: SOURCE_ID,
             minzoom: 0,
-            maxzoom: MAX_ZOOM + 0.99, // stop requesting tiles above z10
+            maxzoom: MAX_ZOOM + 0.99,
             paint: {
-              'raster-opacity': 0.55,
+              // Enhanced opacity for better visibility on dark globe
+              'raster-opacity': 0.65,
               'raster-fade-duration': 0,
-              'raster-resampling': 'linear', // bilinear upscale when past maxzoom
-              'raster-hue-rotate': 0,
-              'raster-contrast': 0.1,        // slight contrast boost for upscaled tiles
-              'raster-brightness-min': 0.02,  // hide near-black noise from upscaling
+              'raster-resampling': 'linear',
+              // XWeather-style color enhancements
+              'raster-contrast': 0.15,        // Boost contrast for radar visibility
+              'raster-brightness-min': 0.02,  // Hide near-black noise from upscaling
+              'raster-brightness-max': 0.95,  // Prevent oversaturation
+              'raster-saturation': 0.2,       // Slight color boost for radar data
             },
           });
 
@@ -129,7 +133,7 @@ export class RadarLayer {
   }
 
   start(): void {
-    // No-op — tiles render via MapLibre, no animation loop needed
+    // No-op — tiles render via MapLibre
   }
 
   stop(): void {

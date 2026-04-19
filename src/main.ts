@@ -3,7 +3,7 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Custom layers   → wind particles, cloud overlay
+ * Custom layers   → wind particles, cloud overlay, atmosphere glow
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -13,8 +13,20 @@ import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
 import { RainEffect } from './clouds/RainEffect';
+import { createAtmosphereLayer } from './scene/AtmosphereLayer';
 
+// ── Mapbox-inspired dark style with enhanced terrain ────────────────
+// Using a style closer to Mapbox Dark v2: deeper blacks, subtle terrain shading
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
+
+// ── Mapbox-style atmosphere colors ──────────────────────────────────
+const ATMOSPHERE_COLORS = {
+  skyDay: [0.35, 0.55, 0.85],     // Soft blue
+  skyNight: [0.02, 0.02, 0.06],   // Near black
+  horizon: [0.6, 0.7, 0.9],       // Light blue haze at horizon
+  sunset: [1.0, 0.45, 0.2],       // Warm orange at terminator
+  sunGlow: [1.0, 0.95, 0.85],     // Bright white-yellow sun
+};
 
 async function init() {
   const container = document.getElementById('app')!;
@@ -36,9 +48,12 @@ async function init() {
     maxPitch: 80,
     attributionControl: false,
     renderWorldCopies: false,
+    // Mapbox-style smooth interactions
+    dragRotate: true,
+    pitchWithRotate: true,
+    touchZoomRotate: true,
     transformRequest: (url, resourceType) => {
-      // Cap RainViewer tile requests at z10 — force parent tile at max zoom
-      // so MapLibre upscales instead of requesting non-existent tiles
+      // Cap RainViewer tile requests at z10
       if (resourceType === 'Tile' && url.includes('rainviewer.com')) {
         const match = url.match(/\/(\d+)\/(\d+)\/(\d+)\.png/);
         if (match) {
@@ -58,12 +73,26 @@ async function init() {
     },
   });
 
-  // Globe projection
+  // Globe projection (Mapbox-style)
   map.on('style.load', () => {
     try {
       (map as any).setProjection({ type: 'globe' });
     } catch (e) {
       console.warn('setProjection failed:', e);
+    }
+
+    // Add fog for depth effect (Mapbox-style distant fog)
+    try {
+      (map as any).setFog({
+        color: 'rgb(10, 15, 30)',        // Dark blue fog at distance
+        'high-color': 'rgb(20, 30, 60)',  // Slightly brighter above horizon
+        'horizon-blend': 0.08,            // Subtle blend at horizon
+        'space-color': 'rgb(2, 4, 10)',   // Deep space color
+        'star-intensity': 0.35,           // Subtle starfield
+      });
+      console.log('[Fog] Mapbox-style atmospheric fog enabled');
+    } catch (e) {
+      console.warn('[Fog] Not supported in this MapLibre version:', e);
     }
   });
 
@@ -72,19 +101,30 @@ async function init() {
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Atmosphere + Sky (globe glow) ──────────────────────────────
+  // ── Atmosphere sky (Mapbox-style glow) ─────────────────────────────
   try {
     (map as any).setSky({
       'sky-type': 'atmosphere',
       'sky-atmosphere-sun': [0.0, 0.0],
       'sky-atmosphere-sun-intensity': 15,
+      'sky-atmosphere-color': 'rgb(35, 55, 100)',
+      'sky-atmosphere-halo-color': 'rgb(255, 200, 100)',
     });
     console.log('[Sky] Atmosphere glow enabled');
   } catch (e) {
     console.warn('[Sky] Failed:', e);
   }
 
-  // ── 3D Terrain elevation ────────────────────────────────────────
+  // ── Custom atmosphere layer (Rayleigh scattering) ──────────────────
+  try {
+    const atmosphereLayer = createAtmosphereLayer();
+    map.addLayer(atmosphereLayer);
+    console.log('[Atmosphere] Custom Rayleigh scattering layer added');
+  } catch (e) {
+    console.warn('[Atmosphere] Custom layer failed:', e);
+  }
+
+  // ── 3D Terrain elevation (Mapbox-style hillshade) ──────────────────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -92,31 +132,52 @@ async function init() {
       tileSize: 256,
       encoding: 'terrarium',
     });
-    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 }); // Higher exaggeration for drama
     console.log('[Terrain] 3D elevation enabled');
+
+    // Add hillshade layer for terrain relief (Mapbox-style)
+    map.addSource('hillshade', {
+      type: 'raster-dem',
+      tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      encoding: 'terrarium',
+    });
+    map.addLayer({
+      id: 'hillshade-layer',
+      type: 'hillshade',
+      source: 'hillshade',
+      paint: {
+        'hillshade-illumination-direction': 315,
+        'hillshade-exaggeration': 0.6,
+        'hillshade-shadow-color': 'rgba(0, 0, 10, 0.8)',
+        'hillshade-highlight-color': 'rgba(80, 100, 140, 0.3)',
+        'hillshade-accent-color': 'rgba(15, 20, 35, 0.5)',
+      },
+    });
+    console.log('[Hillshade] Terrain relief shading enabled');
   } catch (e) {
     console.warn('[Terrain] Failed to load:', e);
   }
 
-  // ── Suppress RainViewer zoom errors ─────────────────────────────
+  // ── Suppress RainViewer zoom errors ─────────────────────────────────
   map.on('error', (e) => {
     const msg = e.error?.message || e.error?.toString() || '';
     if (msg.includes('rainviewer') || msg.includes('zoom level')) {
-      return; // silently ignore — we handle zoom capping via transformRequest
+      return;
     }
     console.error('MapLibre error:', e);
   });
 
-  // ── Add weather layers immediately ──────────────────────────────
+  // ── Add weather layers ─────────────────────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const radarLayer = new RadarLayer(map, weather);
   const rainEffect = new RainEffect(map);
 
-  // Start radar + rain on init (they're on by default)
+  // Start radar + rain on init
   radarLayer.setVisible(true);
   rainEffect.setVisible(true);
 
-  // ── UI immediately ─────────────────────────────────────────────
+  // ── UI ─────────────────────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
     onTimeChange: (t) => weather.setTime(t),
     onLevelChange: (l) => weather.setLevel(l),
@@ -142,11 +203,11 @@ async function init() {
     },
   });
 
-  // ── Fetch weather data in background (non-blocking) ────────────
+  // ── Fetch weather data in background ───────────────────────────────
   weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
-  let autoRotate = true; // start with auto-rotate ON
+  let autoRotate = true;
 
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
@@ -183,23 +244,24 @@ async function init() {
     }
   });
 
-  // ── Auto-rotation (smooth, slows on interaction) ───────────────────
-  let rotationSpeed = 0.08;
+  // ── Auto-rotation (Mapbox-style smooth bearing change) ─────────────
+  let rotationSpeed = 0.06; // Slower, more cinematic
 
   function autoRotateTick() {
     if (autoRotate) {
-      map.setBearing(map.getBearing() + rotationSpeed);
+      const currentBearing = map.getBearing();
+      map.setBearing(currentBearing + rotationSpeed);
     }
     requestAnimationFrame(autoRotateTick);
   }
   autoRotateTick();
 
-  // Pause rotation on interaction, resume after 3s of inactivity
+  // Pause rotation on interaction, resume after 4s (longer pause feels more natural)
   let interactionTimer: ReturnType<typeof setTimeout> | null = null;
   const pauseRotation = () => {
     autoRotate = false;
     if (interactionTimer) clearTimeout(interactionTimer);
-    interactionTimer = setTimeout(() => { autoRotate = true; }, 3000);
+    interactionTimer = setTimeout(() => { autoRotate = true; }, 4000);
   };
   map.on('mousedown', pauseRotation);
   map.on('touchstart', pauseRotation);
