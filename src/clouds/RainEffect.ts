@@ -1,17 +1,19 @@
 /**
- * RainEffect — Radar-driven rain overlay on the MapLibre globe.
+ * RainEffect — Radar-driven rain on the MapLibre globe.
  *
- * Downloads z1 world tiles from RainViewer (4 tiles covering the globe),
- * composites into a single 512×256 intensity grid.
- * Samples from this grid using lon/lat (same coordinate system as wind particles).
- * Rain falls toward the globe disc center in screen space.
+ * Downloads z10 RainViewer tiles for the current viewport (max sharpness).
+ * Converts tile pixel positions to lon/lat using proper Mercator math.
+ * Spawns rain drops at precipitation locations — only where radar shows rain.
+ * Falls toward globe disc center in screen space.
  */
 
 import maplibregl from 'maplibre-gl';
 
-const TOTAL_DROPS = 10000;
-const MAX_DRAWN = 6000;
+const MAX_DROPS = 8000;
+const MAX_DRAWN = 5000;
 const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
+const TILE_SIZE = 256;
+const ZOOM = 10; // max sharpness
 
 const NUM_BINS = 5;
 const BIN_COLORS: [number, number, number, number][] = [
@@ -28,6 +30,14 @@ interface Drop {
   fall: number;
   speed: number;
   length: number;
+  intensity: number;
+}
+
+// Precipitation points extracted from radar tiles
+interface PrecipPoint {
+  lon: number;
+  lat: number;
+  intensity: number; // 0-1
 }
 
 export class RainEffect {
@@ -36,15 +46,13 @@ export class RainEffect {
   private ctx: CanvasRenderingContext2D;
   private animId: number | null = null;
   private resizeObs: ResizeObserver;
-  private drops: Drop[] = [];
   private visible = false;
 
-  // Radar intensity grid (equirectangular, lon/lat mapped)
-  private intensity: Float32Array | null = null;
-  private gridW = 512;
-  private gridH = 256;
+  private drops: Drop[] = [];
+  private precipPoints: PrecipPoint[] = [];
   private latestPath = '';
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private lastTileFetch = 0;
 
   constructor(map: maplibregl.Map) {
     this.map = map;
@@ -62,12 +70,11 @@ export class RainEffect {
     this.resizeObs.observe(map.getContainer());
     this.resize();
 
-    for (let i = 0; i < TOTAL_DROPS; i++) {
-      this.drops.push(this.spawn());
-    }
-
     this.loadRadar();
     this.refreshTimer = setInterval(() => this.loadRadar(), 10 * 60 * 1000);
+
+    // Also refresh tiles when map moves significantly
+    map.on('moveend', () => this.loadRadar());
   }
 
   private resize(): void {
@@ -78,30 +85,40 @@ export class RainEffect {
     this.ctx.setTransform(d, 0, 0, d, 0, 0);
   }
 
-  private spawn(): Drop {
-    return {
-      lon: (Math.random() - 0.5) * 360,
-      lat: (Math.random() - 0.5) * 150,
-      fall: Math.random(),
-      speed: 0.012 + Math.random() * 0.018,
-      length: 0.5 + Math.random() * 0.8,
-    };
+  /**
+   * Mercator: lon/lat → tile x/y at zoom level
+   */
+  private static lonToTileX(lon: number, z: number): number {
+    return Math.floor((lon + 180) / 360 * (1 << z));
+  }
+
+  private static latToTileY(lat: number, z: number): number {
+    const latRad = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * (1 << z));
   }
 
   /**
-   * Load RainViewer z1 tiles (2×2 = 4 tiles covering the world).
-   * Each tile is 256×256. Composited into 512×512.
-   *
-   * RainViewer tile addressing matches standard slippy map tiles:
-   *   z=1, x=0..1, y=0..1
-   *   y=0 → north (lat 85°N to equator)
-   *   y=1 → south (equator to lat 85°S)
-   *
-   * We composite into a 512×256 equirectangular grid where:
-   *   grid y=0 → lat 90°N, grid y=256 → lat 90°S
-   *   grid x=0 → lon -180°, grid x=512 → lon 180°
+   * Mercator: tile pixel → lon/lat
+   */
+  private static tilePixelToLon(tx: number, px: number, z: number): number {
+    const n = 1 << z;
+    return (tx + px / TILE_SIZE) / n * 360 - 180;
+  }
+
+  private static tilePixelToLat(ty: number, py: number, z: number): number {
+    const n = 1 << z;
+    const y = (ty + py / TILE_SIZE) / n;
+    return Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
+  }
+
+  /**
+   * Load z10 radar tiles for the current viewport and extract precipitation points.
    */
   private async loadRadar(): Promise<void> {
+    const now = performance.now();
+    if (now - this.lastTileFetch < 5000) return; // throttle
+    this.lastTileFetch = now;
+
     try {
       const res = await fetch(RAINDVIEWER_API);
       if (!res.ok) return;
@@ -115,80 +132,109 @@ export class RainEffect {
       if (basePath === this.latestPath) return;
       this.latestPath = basePath;
 
-      // Download 4 z1 tiles: 2 columns × 2 rows
-      const urls = [
-        `${basePath}/1/0/0/2/1_1.png`, // NW
-        `${basePath}/1/1/0/2/1_1.png`, // NE
-        `${basePath}/1/0/1/2/1_1.png`, // SW
-        `${basePath}/1/1/1/2/1_1.png`, // SE
-      ];
+      // Get viewport bounds
+      const bounds = this.map.getBounds();
+      const z = ZOOM;
 
-      const imgs = await Promise.all(urls.map(u =>
-        new Promise<HTMLImageElement | null>(r => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => r(img);
-          img.onerror = () => r(null);
-          img.src = u;
-        })
-      ));
+      // Calculate tile range for viewport
+      const minTX = RainEffect.lonToTileX(bounds.getWest(), z);
+      const maxTX = RainEffect.lonToTileX(bounds.getEast(), z);
+      const minTY = RainEffect.latToTileY(bounds.getNorth(), z);
+      const maxTY = RainEffect.latToTileY(bounds.getSouth(), z);
 
-      // Composite into 512×256 equirectangular grid
-      const c = document.createElement('canvas');
-      c.width = this.gridW;
-      c.height = this.gridH;
-      const cx = c.getContext('2d')!;
-      cx.clearRect(0, 0, this.gridW, this.gridH);
+      // Fetch all tiles in viewport (max ~16 tiles typically)
+      const tilePromises: Promise<void>[] = [];
+      const points: PrecipPoint[] = [];
+      const maxTiles = 25; // safety limit
 
-      const tw = this.gridW / 2; // 256
-      const th = this.gridH / 2; // 128
+      let count = 0;
+      for (let ty = minTY; ty <= maxTY && count < maxTiles; ty++) {
+        for (let tx = minTX; tx <= maxTX && count < maxTiles; tx++) {
+          count++;
+          const tileX = ((tx % (1 << z)) + (1 << z)) % (1 << z); // wrap
+          const url = `${basePath}/${z}/${tileX}/${ty}/2/1_1.png`;
 
-      // Place tiles: x=0,y=0 → top-left (NW), etc.
-      if (imgs[0]) cx.drawImage(imgs[0], 0, 0, tw, th);       // NW
-      if (imgs[1]) cx.drawImage(imgs[1], tw, 0, tw, th);      // NE
-      if (imgs[2]) cx.drawImage(imgs[2], 0, th, tw, th);      // SW
-      if (imgs[3]) cx.drawImage(imgs[3], tw, th, tw, th);     // SE
-
-      // Extract intensity from RGB luminance × alpha
-      const pixels = cx.getImageData(0, 0, this.gridW, this.gridH).data;
-      this.intensity = new Float32Array(this.gridW * this.gridH);
-      let nonZero = 0;
-      for (let i = 0; i < this.gridW * this.gridH; i++) {
-        const r = pixels[i * 4];
-        const g = pixels[i * 4 + 1];
-        const b = pixels[i * 4 + 2];
-        const a = pixels[i * 4 + 3];
-        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-        const val = lum * (a / 255);
-        this.intensity[i] = val;
-        if (val > 0.02) nonZero++;
+          tilePromises.push(this.extractPrecipFromTile(url, tileX, ty, z, points));
+        }
       }
-      console.log(`[Rain] Radar: ${this.gridW}×${this.gridH}, ${nonZero} px`);
+
+      await Promise.allSettled(tilePromises);
+
+      this.precipPoints = points;
+      console.log(`[Rain] ${points.length} precip points from ${count} z${z} tiles`);
+
+      // Spawn drops at precip locations
+      this.spawnDropsFromPrecip();
     } catch (e) {
-      console.warn('[Rain] Load failed:', e);
+      console.warn('[Rain] Radar load failed:', e);
     }
   }
 
   /**
-   * Sample radar intensity at lon/lat.
-   * Grid mapping:
-   *   x = (lon + 180) / 360 * gridW
-   *   y = (90 - lat) / 180 * gridH
-   * Same convention as wind's 360×180 grid.
+   * Download a single radar tile and extract precipitation pixel locations.
+   * Converts each non-zero pixel to lon/lat using Mercator math.
    */
-  private sample(lon: number, lat: number): number {
-    if (!this.intensity) return 0;
-    const nx = ((lon + 180) / 360) * this.gridW;
-    const ny = ((90 - lat) / 180) * this.gridH;
-    const x0 = Math.floor(nx) % this.gridW;
-    const y0 = Math.max(0, Math.min(this.gridH - 1, Math.floor(ny)));
-    const x1 = (x0 + 1) % this.gridW;
-    const y1 = Math.min(this.gridH - 1, y0 + 1);
-    const fx = nx - Math.floor(nx);
-    const fy = ny - Math.floor(ny);
-    const i = this.gridW;
-    return this.intensity[y0*i+x0]*(1-fx)*(1-fy) + this.intensity[y0*i+x1]*fx*(1-fy) +
-           this.intensity[y1*i+x0]*(1-fx)*fy + this.intensity[y1*i+x1]*fx*fy;
+  private extractPrecipFromTile(
+    url: string, tx: number, ty: number, z: number,
+    out: PrecipPoint[]
+  ): Promise<void> {
+    return new Promise(resolve => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = TILE_SIZE;
+        c.height = TILE_SIZE;
+        const cx = c.getContext('2d')!;
+        cx.drawImage(img, 0, 0);
+        const pixels = cx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
+
+        // Sample every 4th pixel for performance
+        const step = 4;
+        for (let py = 0; py < TILE_SIZE; py += step) {
+          for (let px = 0; px < TILE_SIZE; px += step) {
+            const i = (py * TILE_SIZE + px) * 4;
+            const r = pixels[i], g = pixels[i+1], b = pixels[i+2], a = pixels[i+3];
+            const lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+            const intensity = lum * (a / 255);
+
+            if (intensity > 0.05) {
+              const lon = RainEffect.tilePixelToLon(tx, px, z);
+              const lat = RainEffect.tilePixelToLat(ty, py, z);
+              out.push({ lon, lat, intensity });
+            }
+          }
+        }
+        resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = url;
+    });
+  }
+
+  /**
+   * Spawn rain drops at precipitation locations.
+   */
+  private spawnDropsFromPrecip(): void {
+    this.drops = [];
+    if (!this.precipPoints.length) return;
+
+    // Create multiple drops per precip point for density
+    const dropsPerPoint = Math.max(1, Math.min(5, Math.floor(MAX_DROPS / this.precipPoints.length)));
+
+    for (const pt of this.precipPoints) {
+      for (let j = 0; j < dropsPerPoint && this.drops.length < MAX_DROPS; j++) {
+        // Scatter drops around the precip point (±0.5° for natural spread)
+        this.drops.push({
+          lon: pt.lon + (Math.random() - 0.5) * 1.0,
+          lat: pt.lat + (Math.random() - 0.5) * 1.0,
+          fall: Math.random(),
+          speed: 0.012 + Math.random() * 0.018,
+          length: 0.5 + Math.random() * 0.8,
+          intensity: pt.intensity,
+        });
+      }
+    }
   }
 
   start(): void {
@@ -229,6 +275,8 @@ export class RainEffect {
     const ch = this.canvas.height / dpr;
     this.ctx.clearRect(0, 0, cw, ch);
 
+    if (!this.drops.length) return;
+
     const zoom = this.map.getZoom();
     const pitch = this.map.getPitch() * Math.PI / 180;
 
@@ -251,23 +299,19 @@ export class RainEffect {
 
       d.fall += d.speed;
       if (d.fall >= 1) {
-        d.lon = (Math.random() - 0.5) * 360;
-        d.lat = (Math.random() - 0.5) * 150;
-        d.fall = 0;
-        d.speed = 0.012 + Math.random() * 0.018;
-        d.length = 0.5 + Math.random() * 0.8;
+        d.fall = 0; // reset fall, keep position (persistent precip location)
       }
 
-      const intensity = this.sample(d.lon, d.lat);
-      if (intensity < 0.03) continue;
-
+      // Project to screen — same as wind particles
       const pt = this.map.project([d.lon, d.lat] as any);
       if (!pt) continue;
 
+      // Inside globe disc
       const dx = pt.x - dcX, dy = pt.y - dcY;
       const dist = Math.sqrt(dx*dx + dy*dy);
       if (dist > gR) continue;
 
+      // Rain direction: toward disc center
       let rdx = 0, rdy = 1;
       if (dist > 2) { rdx = -dx/dist; rdy = -dy/dist; }
 
@@ -278,9 +322,8 @@ export class RainEffect {
 
       if ((hx-tx)**2+(hy-ty)**2 > 40000) continue;
       if (hy<-20||hy>ch+20||ty<-20||ty>ch+20) continue;
-      if (hx<-20||hx>cw+20||tx<-20||tx>cw+20) continue;
 
-      const bin = Math.min(NUM_BINS-1, Math.floor(intensity*NUM_BINS));
+      const bin = Math.min(NUM_BINS-1, Math.floor(d.intensity*NUM_BINS));
       const segs = binSegs[bin];
       let sc = binCounts[bin];
       if (sc >= maxSegs-4) continue;
