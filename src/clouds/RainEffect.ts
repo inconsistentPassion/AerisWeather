@@ -184,25 +184,40 @@ export class RainEffect {
   /**
    * Globe visibility factor for a point.
    * Returns 0 (fully hidden / back side) to 1 (fully visible / center).
-   * Uses proper dot product in globe space with a smooth limb fade.
+   *
+   * Converts lat/lon to a 3D surface normal, rotates it by the same
+   * view transform MapLibre uses (bearing then pitch), and checks the
+   * resulting depth. Points with negative depth are behind the globe.
    */
   private globeVisibility(lon: number, lat: number): number {
-    const c = this.map.getCenter();
-    const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
 
-    // Dot product between view direction and surface normal
-    const dot = Math.sin(cLat) * Math.sin(pLat) +
-                Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon);
+    // Unit sphere surface normal at this lat/lon
+    const nx = Math.cos(pLat) * Math.cos(pLon);
+    const ny = Math.sin(pLat);
+    const nz = Math.cos(pLat) * Math.sin(pLon);
 
-    // Smooth ramp: fully hidden behind globe (dot ≤ 0), fully visible above 0.25
-    // dot ≤ 0 means the point is on the back hemisphere — must hide
-    if (dot <= 0) return 0;
-    if (dot >= 0.25) return 1;
-    // Smooth hermite interpolation at the limb
-    const t = dot / 0.25;
+    // View rotation: MapLibre globe rotates by bearing around Y, then pitch around X
+    const bearing = this.map.getBearing() * Math.PI / 180;
+    const pitch = this.map.getPitch() * Math.PI / 180;
+
+    // Bearing rotation (around Y axis — north pole)
+    const cosB = Math.cos(bearing), sinB = Math.sin(bearing);
+    const rx = nx * cosB + nz * sinB;
+    const ry = ny;
+    const rz = -nx * sinB + nz * cosB;
+
+    // Pitch rotation (around X axis)
+    const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+    const depth = -ry * sinP + rz * cosP;
+
+    // depth > 0 = facing camera (front hemisphere)
+    // depth ≤ 0 = behind globe (back hemisphere)
+    if (depth <= 0) return 0;
+    if (depth >= 0.2) return 1;
+    // Smooth limb fade
+    const t = depth / 0.2;
     return t * t * (3 - 2 * t);
   }
 
@@ -227,7 +242,7 @@ export class RainEffect {
 
       // Check visibility
       const vis = this.globeVisibility(lon, lat);
-      if (vis < 0.05) continue; // don't spawn behind globe
+      if (vis < 0.3) continue; // only spawn on clearly visible side
 
       const maxAge = 60 + Math.floor(Math.random() * 60);
       this.drops.push({
@@ -327,7 +342,7 @@ export class RainEffect {
 
       // Globe visibility (back-face + limb fade)
       const vis = this.globeVisibility(d.lon, d.lat);
-      if (vis < 0.05) continue; // fully behind globe
+      if (vis < 0.01) continue; // fully behind globe
 
       // Project to screen
       const pt = this.map.project([d.lon, d.lat] as any);
