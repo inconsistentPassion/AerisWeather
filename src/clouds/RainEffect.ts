@@ -182,44 +182,35 @@ export class RainEffect {
   // ── Occlusion ───────────────────────────────────────────────────────
 
   // ── Globe occlusion ──────────────────────────────────────────────────
-  // Camera direction derived from MapLibre's globe transform:
-  // rotateY(lng) * rotateX(-lat) * rotateZ(-bearing) * rotateX(pitch) * [0,0,1]
-  // A surface point is visible when dot(cameraDir, surfaceNormal) > 0.
+  // Uses MapLibre's own isLocationOccluded from the internal transform.
+  // This is the exact same check the renderer uses to cull tiles/symbols.
 
   /**
    * Globe visibility for a lat/lon point.
    * Returns 0 (behind globe) to 1 (front hemisphere).
    */
   private globeVisibility(lon: number, lat: number): number {
-    const pLat = lat * Math.PI / 180;
-    const pLon = lon * Math.PI / 180;
+    // MapLibre's internal transform has isLocationOccluded
+    const transform = (this.map as any).transform;
+    if (transform?.isLocationOccluded) {
+      const occluded = transform.isLocationOccluded({ lng: lon, lat });
+      return occluded ? 0 : 1;
+    }
 
-    // Unit sphere surface normal at this point
-    const nx = Math.cos(pLat) * Math.cos(pLon);
-    const ny = Math.sin(pLat);
-    const nz = Math.cos(pLat) * Math.sin(pLon);
-
-    // Camera direction: rotate [0,0,1] by pitch, bearing, lat, lng
+    // Fallback: great circle distance from map center (works at pitch≈0)
     const c = this.map.getCenter();
     const cLat = c.lat * Math.PI / 180;
     const cLon = c.lng * Math.PI / 180;
-    const bearing = this.map.getBearing() * Math.PI / 180;
-    const pitch = this.map.getPitch() * Math.PI / 180;
-
-    const cosB = Math.cos(bearing), sinB = Math.sin(bearing);
-    const sinLat = Math.sin(cLat), cosLat = Math.cos(cLat);
-    const sinLng = Math.sin(cLon), cosLng = Math.cos(cLon);
-    const sinP = Math.sin(pitch), cosP = Math.cos(pitch);
-
-    const camX = cosLng * (sinB * cosP + sinLat * sinP) - sinLng * cosLat * cosB;
-    const camY = -sinLat * sinB * cosP + cosLat * sinP;
-    const camZ = sinLng * (sinB * cosP + sinLat * sinP) + cosLng * cosLat * cosB;
-
-    const dot = camX * nx + camY * ny + camZ * nz;
-
-    if (dot <= 0) return 0;
-    if (dot >= 0.15) return 1;
-    const t = dot / 0.15;
+    const pLat = lat * Math.PI / 180;
+    const pLon = lon * Math.PI / 180;
+    const dLat = pLat - cLat;
+    const dLon = pLon - cLon;
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(cLat) * Math.cos(pLat) * Math.sin(dLon / 2) ** 2;
+    const angle = 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+    if (angle > 85 * Math.PI / 180) return 0;
+    if (angle < 75 * Math.PI / 180) return 1;
+    const t = 1 - (angle - 75 * Math.PI / 180) / (10 * Math.PI / 180);
     return t * t * (3 - 2 * t);
   }
 
