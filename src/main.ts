@@ -30,8 +30,8 @@ async function init() {
     container,
     style: STYLE_URL,
     center: [0, 20],
-    zoom: 2.5,
-    pitch: 49,
+    zoom: 1.8,
+    pitch: 52,
     bearing: -20,
     maxPitch: 80,
     attributionControl: false,
@@ -71,6 +71,18 @@ async function init() {
 
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
+
+  // ── Atmosphere + Sky (globe glow) ──────────────────────────────
+  try {
+    (map as any).setSky({
+      'sky-type': 'atmosphere',
+      'sky-atmosphere-sun': [0.0, 0.0],
+      'sky-atmosphere-sun-intensity': 15,
+    });
+    console.log('[Sky] Atmosphere glow enabled');
+  } catch (e) {
+    console.warn('[Sky] Failed:', e);
+  }
 
   // ── 3D Terrain elevation ────────────────────────────────────────
   try {
@@ -134,7 +146,7 @@ async function init() {
   weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
-  let autoRotate = false;
+  let autoRotate = true; // start with auto-rotate ON
 
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
@@ -143,13 +155,13 @@ async function init() {
         autoRotate = !autoRotate;
         break;
       case 'KeyR':
-        map.flyTo({ center: [0, 20], zoom: 2.5, pitch: 49, bearing: -20, duration: 1500 });
+        map.flyTo({ center: [0, 20], zoom: 1.8, pitch: 52, bearing: -20, duration: 1500 });
         break;
       case 'Digit1':
         document.getElementById('btn-wind')?.click();
         break;
       case 'Digit2':
-        document.getElementById('btn-clouds')?.click();
+        document.getElementById('btn-radar')?.click();
         break;
       case 'Digit3':
         document.getElementById('btn-temp')?.click();
@@ -171,17 +183,28 @@ async function init() {
     }
   });
 
-  // ── Auto-rotation ──────────────────────────────────────────────────
+  // ── Auto-rotation (smooth, slows on interaction) ───────────────────
+  let rotationSpeed = 0.08;
+
   function autoRotateTick() {
     if (autoRotate) {
-      map.setBearing(map.getBearing() + 0.1);
+      map.setBearing(map.getBearing() + rotationSpeed);
     }
     requestAnimationFrame(autoRotateTick);
   }
   autoRotateTick();
 
-  map.on('mousedown', () => { autoRotate = false; });
-  map.on('touchstart', () => { autoRotate = false; });
+  // Pause rotation on interaction, resume after 3s of inactivity
+  let interactionTimer: ReturnType<typeof setTimeout> | null = null;
+  const pauseRotation = () => {
+    autoRotate = false;
+    if (interactionTimer) clearTimeout(interactionTimer);
+    interactionTimer = setTimeout(() => { autoRotate = true; }, 3000);
+  };
+  map.on('mousedown', pauseRotation);
+  map.on('touchstart', pauseRotation);
+  map.on('wheel', pauseRotation);
+  map.on('dragstart', pauseRotation);
 }
 
 init().catch(console.error);
