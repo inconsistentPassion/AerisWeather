@@ -1,43 +1,63 @@
 /**
- * RainEffect — Radar-driven rain on the MapLibre globe.
+ * RainEffect — Dynamic radar-driven rain on the MapLibre globe.
  *
- * Downloads z1 world tiles from RainViewer (4 tiles, always available).
- * Converts tile pixels to lon/lat using Mercator projection math.
- * Rain drops are spawned at actual precipitation locations.
- * Falls toward globe disc center in screen space.
+ * Loads precipitation grids from RainViewer tiles and stores them as a
+ * density map. Each frame, drops spawn randomly within areas where
+ * precipitation exists, creating a natural evolving rain look.
+ *
+ * Back-face occlusion uses proper globe-space dot product with a
+ * smooth limb fade so rain doesn't pop on/off at the horizon.
  */
 
 import maplibregl from 'maplibre-gl';
 
-const MAX_DROPS = 8000;
-const MAX_DRAWN = 5000;
-const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
-const TILE_PX = 256;
-const ZOOM = 1;
+// ── Config ────────────────────────────────────────────────────────────
+const MAX_DROPS        = 6000;   // cap live drops
+const SPAWN_PER_FRAME  = 180;    // new drops per frame (fills over ~1s)
+const TILE_PX          = 256;
+const RAINDVIEWER_API  = 'https://api.rainviewer.com/public/weather-maps.json';
 
+// Intensity bins → color + opacity
 const NUM_BINS = 5;
 const BIN_COLORS: [number, number, number, number][] = [
-  [80, 130, 200, 0.22],
-  [120, 170, 230, 0.32],
-  [160, 210, 250, 0.42],
-  [200, 230, 255, 0.52],
-  [240, 248, 255, 0.62],
+  [ 90, 140, 210, 0.18],   // light drizzle
+  [130, 180, 235, 0.28],   // moderate
+  [170, 215, 255, 0.40],   // heavy
+  [210, 235, 255, 0.52],   // very heavy
+  [245, 250, 255, 0.64],   // extreme
 ];
 
-interface Drop {
-  lon: number; lat: number;
-  fall: number; speed: number; length: number;
-  intensity: number;
+// ── Precipitation cell ────────────────────────────────────────────────
+// A rectangular region of the radar grid where rain exists.
+interface PrecipCell {
+  lon: number;   // center lon
+  lat: number;   // center lat
+  halfLon: number; // half-width in lon degrees
+  halfLat: number; // half-height in lat degrees
+  intensity: number; // 0-1
 }
 
-// Mercator tile math
-function pixelToLon(tileX: number, px: number): number {
-  return ((tileX + px / TILE_PX) / (1 << ZOOM)) * 360 - 180;
+// ── Live drop ─────────────────────────────────────────────────────────
+interface Drop {
+  lon: number; lat: number;
+  fall: number;  // 0→1 animation progress
+  speed: number;
+  length: number;
+  intensity: number;
+  age: number;   // frames lived
+  maxAge: number;
 }
-function pixelToLat(tileY: number, py: number): number {
-  const n = Math.PI - 2 * Math.PI * (tileY + py / TILE_PX) / (1 << ZOOM);
-  return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+
+// ── Mercator tile helpers ─────────────────────────────────────────────
+function pixelToLon(tileX: number, px: number, zoom: number): number {
+  return ((tileX + px / TILE_PX) / (1 << zoom)) * 360 - 180;
 }
+function pixelToLat(tileY: number, py: number, zoom: number): number {
+  const n = Math.PI - 2 * Math.PI * (tileY + py / TILE_PX) / (1 << zoom);
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+// ── RainEffect ────────────────────────────────────────────────────────
 
 export class RainEffect {
   private map: maplibregl.Map;
@@ -45,10 +65,18 @@ export class RainEffect {
   private ctx: CanvasRenderingContext2D;
   private animId: number | null = null;
   private resizeObs: ResizeObserver;
-  private drops: Drop[] = [];
   private visible = false;
-  private latestPath = '';
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Precipitation cells (where rain exists)
+  private cells: PrecipCell[] = [];
+
+  // Live drops (pool)
+  private drops: Drop[] = [];
+
+  // Globe radius in screen pixels (computed each frame)
+  private globeRadius = 0;
+  private globeCenter = { x: 0, y: 0 };
 
   constructor(map: maplibregl.Map) {
     this.map = map;
@@ -75,6 +103,8 @@ export class RainEffect {
     this.ctx.setTransform(d, 0, 0, d, 0, 0);
   }
 
+  // ── Radar loading (stores cells, not drops) ─────────────────────────
+
   private async loadRadar(): Promise<void> {
     try {
       const res = await fetch(RAINDVIEWER_API);
@@ -85,20 +115,27 @@ export class RainEffect {
       if (!past.length) return;
       const latest = past[past.length - 1];
       const basePath = `${host}${latest.path}/256`;
-      if (basePath === this.latestPath) return;
-      this.latestPath = basePath;
 
-      // Download 4 z1 tiles: NW(0,0) NE(1,0) SW(0,1) SE(1,1)
-      const tiles = [
-        { url: `${basePath}/1/0/0/2/1_1.png`, tx: 0, ty: 0 },
-        { url: `${basePath}/1/1/0/2/1_1.png`, tx: 1, ty: 0 },
-        { url: `${basePath}/1/0/1/2/1_1.png`, tx: 0, ty: 1 },
-        { url: `${basePath}/1/1/1/2/1_1.png`, tx: 1, ty: 1 },
-      ];
+      // Use z3 tiles for better spatial resolution (64 tiles)
+      const zoom = 3;
+      const tilesPerSide = 1 << zoom; // 8
+      const totalTiles = tilesPerSide * tilesPerSide; // 64
 
-      const drops: Drop[] = [];
+      const tileUrls: Array<{ url: string; tx: number; ty: number }> = [];
+      for (let ty = 0; ty < tilesPerSide; ty++) {
+        for (let tx = 0; tx < tilesPerSide; tx++) {
+          tileUrls.push({
+            url: `${basePath}/${zoom}/${tx}/${ty}/2/1_1.png`,
+            tx, ty,
+          });
+        }
+      }
 
-      await Promise.all(tiles.map(({ url, tx, ty }) =>
+      // Download all tiles and extract precipitation cells
+      const cells: PrecipCell[] = [];
+      const CELL_STRIDE = 4; // sample every N pixels
+
+      await Promise.all(tileUrls.map(({ url, tx, ty }) =>
         new Promise<void>(resolve => {
           const img = new Image();
           img.crossOrigin = 'anonymous';
@@ -109,23 +146,21 @@ export class RainEffect {
             cx.drawImage(img, 0, 0);
             const px = cx.getImageData(0, 0, TILE_PX, TILE_PX).data;
 
-            // Sample every 4th pixel for perf
-            for (let py = 0; py < TILE_PX; py += 3) {
-              for (let pxx = 0; pxx < TILE_PX; pxx += 3) {
+            for (let py = 0; py < TILE_PX; py += CELL_STRIDE) {
+              for (let pxx = 0; pxx < TILE_PX; pxx += CELL_STRIDE) {
                 const i = (py * TILE_PX + pxx) * 4;
-                const r = px[i], g = px[i+1], b = px[i+2], a = px[i+3];
-                const lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+                const r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+                const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
                 const intensity = lum * (a / 255);
-                if (intensity > 0.05) {
-                  const lon = pixelToLon(tx, pxx);
-                  const lat = pixelToLat(ty, py);
-                  // Spawn a drop here
-                  drops.push({
+                if (intensity > 0.08) {
+                  const lon = pixelToLon(tx, pxx + CELL_STRIDE / 2, zoom);
+                  const lat = pixelToLat(ty, py + CELL_STRIDE / 2, zoom);
+                  const cellSize = (360 / (1 << zoom)) / TILE_PX * CELL_STRIDE;
+                  cells.push({
                     lon, lat,
-                    fall: Math.random(),
-                    speed: 0.012 + Math.random() * 0.018,
-                    length: 0.5 + Math.random() * 0.8,
-                    intensity,
+                    halfLon: cellSize,
+                    halfLat: cellSize * 0.5, // Mercator stretch
+                    intensity: Math.min(1, intensity * 1.5),
                   });
                 }
               }
@@ -137,35 +172,82 @@ export class RainEffect {
         })
       ));
 
-      // Limit total drops
-      if (drops.length > MAX_DROPS) {
-        // Keep every Nth drop to fit limit
-        const step = drops.length / MAX_DROPS;
-        const limited: Drop[] = [];
-        for (let i = 0; i < drops.length; i += step) {
-          limited.push(drops[Math.floor(i)]);
-        }
-        this.drops = limited;
-      } else {
-        this.drops = drops;
-      }
-
-      console.log(`[Rain] ${this.drops.length} drops from z${ZOOM} tiles`);
+      this.cells = cells;
+      console.log(`[Rain] ${cells.length} precip cells from z${zoom} radar`);
     } catch (e) {
-      console.warn('[Rain] Load failed:', e);
+      console.warn('[Rain] Radar load failed:', e);
     }
   }
 
-  /** Same front-side check as WindParticleLayer */
-  private isFrontSide(lon: number, lat: number): boolean {
+  // ── Occlusion ───────────────────────────────────────────────────────
+
+  /**
+   * Globe visibility factor for a point.
+   * Returns 0 (fully hidden / back side) to 1 (fully visible / center).
+   * Uses proper dot product in globe space with a smooth limb fade.
+   */
+  private globeVisibility(lon: number, lat: number): number {
     const c = this.map.getCenter();
     const cLat = c.lat * Math.PI / 180;
     const cLon = c.lng * Math.PI / 180;
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
-    return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
+
+    // Dot product between view direction and surface normal
+    const dot = Math.sin(cLat) * Math.sin(pLat) +
+                Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon);
+
+    // Smooth ramp: fully hidden below -0.05, fully visible above 0.3
+    // This creates a natural limb fade instead of a hard edge
+    if (dot <= -0.05) return 0;
+    if (dot >= 0.3) return 1;
+    // Smooth hermite interpolation
+    const t = (dot + 0.05) / 0.35;
+    return t * t * (3 - 2 * t);
   }
+
+  // ── Spawning ────────────────────────────────────────────────────────
+
+  /**
+   * Spawn drops at random precipitation cells that are visible.
+   * Weighted by cell intensity so heavier rain areas get more drops.
+   */
+  private spawnBatch(count: number): void {
+    if (this.cells.length === 0) return;
+
+    for (let i = 0; i < count; i++) {
+      // Pick a random cell, weighted by intensity
+      // (simple approach: pick random, reject if rand > intensity)
+      const cell = this.cells[Math.floor(Math.random() * this.cells.length)];
+      if (Math.random() > cell.intensity) continue;
+
+      // Spawn within the cell with some jitter
+      const lon = cell.lon + (Math.random() - 0.5) * cell.halfLon * 2;
+      const lat = cell.lat + (Math.random() - 0.5) * cell.halfLat * 2;
+
+      // Check visibility
+      const vis = this.globeVisibility(lon, lat);
+      if (vis < 0.1) continue; // don't spawn invisible drops
+
+      const maxAge = 60 + Math.floor(Math.random() * 60);
+      this.drops.push({
+        lon, lat,
+        fall: Math.random() * 0.3, // stagger start
+        speed: 0.015 + Math.random() * 0.02 + cell.intensity * 0.01,
+        length: 0.4 + Math.random() * 0.6 + cell.intensity * 0.4,
+        intensity: cell.intensity,
+        age: 0,
+        maxAge,
+      });
+    }
+
+    // Trim pool
+    if (this.drops.length > MAX_DROPS) {
+      this.drops.splice(0, this.drops.length - MAX_DROPS);
+    }
+  }
+
+  // ── Lifecycle ───────────────────────────────────────────────────────
 
   start(): void {
     if (this.animId !== null) return;
@@ -173,28 +255,34 @@ export class RainEffect {
     const tick = () => { this.animId = requestAnimationFrame(tick); this.frame(); };
     this.animId = requestAnimationFrame(tick);
   }
+
   stop(): void {
     this.visible = false;
     if (this.animId !== null) { cancelAnimationFrame(this.animId); this.animId = null; }
   }
+
   setVisible(v: boolean): void {
     this.canvas.style.display = v ? '' : 'none';
     if (v) { this.clear(); this.start(); }
     else { this.stop(); this.clear(); }
   }
+
   destroy(): void {
     this.stop();
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.resizeObs.disconnect();
     this.canvas.remove();
   }
+
   private clear(): void {
     const d = devicePixelRatio;
     this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
   }
 
+  // ── Frame ───────────────────────────────────────────────────────────
+
   private frame(): void {
-    if (!this.visible || this.canvas.style.display === 'none' || !this.drops.length) {
+    if (!this.visible || this.canvas.style.display === 'none') {
       if (this.visible) this.clear();
       return;
     }
@@ -204,69 +292,100 @@ export class RainEffect {
     const ch = this.canvas.height / dpr;
     this.ctx.clearRect(0, 0, cw, ch);
 
+    // Spawn new drops this frame
+    this.spawnBatch(SPAWN_PER_FRAME);
+
+    // Globe projection estimate
     const zoom = this.map.getZoom();
     const pitch = this.map.getPitch() * Math.PI / 180;
-    const scX = cw / 2, scY = ch / 2;
-    const gR = Math.min(cw, ch) * 0.38 * Math.pow(2, zoom - 2.0);
-    const dcX = scX;
-    const dcY = scY + Math.sin(pitch) * gR * 0.5;
+    this.globeRadius = Math.min(cw, ch) * 0.38 * Math.pow(2, zoom - 2.0);
+    this.globeCenter.x = cw / 2;
+    this.globeCenter.y = ch / 2 + Math.sin(pitch) * this.globeRadius * 0.5;
 
+    // Bin segments by intensity
     const binSegs: Float64Array[] = [];
     const binCounts = new Int32Array(NUM_BINS);
-    const maxSegs = Math.ceil(MAX_DRAWN / NUM_BINS) * 4;
+    const maxSegs = Math.ceil(MAX_DROPS / NUM_BINS) * 4;
     for (let b = 0; b < NUM_BINS; b++) binSegs.push(new Float64Array(maxSegs));
 
     let drawn = 0;
-    const sz = Math.max(0.5, Math.min(2, zoom / 5));
+    const sz = Math.max(0.6, Math.min(2.0, zoom / 4.5));
 
-    for (const d of this.drops) {
-      if (drawn >= MAX_DRAWN) break;
+    // Advance and draw drops
+    for (let i = this.drops.length - 1; i >= 0; i--) {
+      const d = this.drops[i];
 
+      // Age out
+      d.age++;
       d.fall += d.speed;
-      if (d.fall >= 1) d.fall = 0;
+      if (d.fall >= 1 || d.age >= d.maxAge) {
+        // Remove dead drop
+        this.drops[i] = this.drops[this.drops.length - 1];
+        this.drops.pop();
+        continue;
+      }
 
+      // Globe visibility (back-face + limb fade)
+      const vis = this.globeVisibility(d.lon, d.lat);
+      if (vis < 0.05) continue; // fully behind globe
+
+      // Project to screen
       const pt = this.map.project([d.lon, d.lat] as any);
-      if (!pt) continue;
 
-      const dx = pt.x - dcX, dy = pt.y - dcY;
-      const dist = Math.sqrt(dx*dx + dy*dy);
-      if (dist > gR) continue;
+      // Screen-space globe radius check (prevents edge artefacts)
+      const gdx = pt.x - this.globeCenter.x;
+      const gdy = pt.y - this.globeCenter.y;
+      const gDist = Math.sqrt(gdx * gdx + gdy * gdy);
+      if (gDist > this.globeRadius * 1.02) continue;
 
-      // Cull back side of globe (same as wind particles)
-      if (!this.isFrontSide(d.lon, d.lat)) continue;
+      // Fade at limb (screen-space supplement to globe-space fade)
+      const limbFade = 1 - Math.pow(Math.min(1, gDist / (this.globeRadius * 0.98)), 3);
+      const alpha = vis * limbFade;
+      if (alpha < 0.02) continue;
 
+      // Direction toward globe center (rain falls inward on globe)
       let rdx = 0, rdy = 1;
-      if (dist > 2) { rdx = -dx/dist; rdy = -dy/dist; }
+      if (gDist > 2) { rdx = -gdx / gDist; rdy = -gdy / gDist; }
 
-      const sl = d.length * sz * 12;
-      const ho = d.fall * sl, to = (d.fall-1)*sl;
-      const hx = pt.x+rdx*ho, hy = pt.y+rdy*ho;
-      const tx = pt.x+rdx*to, ty = pt.y+rdy*to;
+      const sl = d.length * sz * 14;
+      const headOffset = d.fall * sl;
+      const tailOffset = (d.fall - 1) * sl;
+      const hx = pt.x + rdx * headOffset;
+      const hy = pt.y + rdy * headOffset;
+      const tx = pt.x + rdx * tailOffset;
+      const ty = pt.y + rdy * tailOffset;
 
-      if ((hx-tx)**2+(hy-ty)**2 > 40000) continue;
-      if (hy<-20||hy>ch+20||ty<-20||ty>ch+20) continue;
+      // Sanity clamp on segment length
+      if ((hx - tx) ** 2 + (hy - ty) ** 2 > 40000) continue;
+      if (hy < -20 || hy > ch + 20 || ty < -20 || ty > ch + 20) continue;
 
-      const bin = Math.min(NUM_BINS-1, Math.floor(d.intensity*NUM_BINS));
+      // Bin by intensity
+      const bin = Math.min(NUM_BINS - 1, Math.floor(d.intensity * NUM_BINS));
       const segs = binSegs[bin];
-      let sc = binCounts[bin];
-      if (sc >= maxSegs-4) continue;
-      segs[sc++]=tx; segs[sc++]=ty; segs[sc++]=hx; segs[sc++]=hy;
-      binCounts[bin] = sc;
+      const sc = binCounts[bin];
+      if (sc >= maxSegs - 4) continue;
+      segs[sc] = tx; segs[sc + 1] = ty;
+      segs[sc + 2] = hx; segs[sc + 3] = hy;
+      binCounts[bin] = sc + 4;
       drawn++;
     }
 
+    // ── Draw ──────────────────────────────────────────────────────────
     this.ctx.lineCap = 'round';
+
     for (let b = 0; b < NUM_BINS; b++) {
       const count = binCounts[b];
       if (!count) continue;
+
       const segs = binSegs[b];
-      const [r,g,bl,a] = BIN_COLORS[b];
+      const [r, g, bl, a] = BIN_COLORS[b];
+
       this.ctx.beginPath();
       for (let j = 0; j < count; j += 4) {
-        this.ctx.moveTo(segs[j], segs[j+1]);
-        this.ctx.lineTo(segs[j+2], segs[j+3]);
+        this.ctx.moveTo(segs[j], segs[j + 1]);
+        this.ctx.lineTo(segs[j + 2], segs[j + 3]);
       }
-      this.ctx.lineWidth = (0.5+b*0.35)*sz;
+      this.ctx.lineWidth = (0.5 + b * 0.35) * sz;
       this.ctx.strokeStyle = `rgba(${r},${g},${bl},${a})`;
       this.ctx.stroke();
     }
