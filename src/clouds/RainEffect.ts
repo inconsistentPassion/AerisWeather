@@ -197,12 +197,12 @@ export class RainEffect {
     const dot = Math.sin(cLat) * Math.sin(pLat) +
                 Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon);
 
-    // Smooth ramp: fully hidden below -0.05, fully visible above 0.3
-    // This creates a natural limb fade instead of a hard edge
-    if (dot <= -0.05) return 0;
-    if (dot >= 0.3) return 1;
-    // Smooth hermite interpolation
-    const t = (dot + 0.05) / 0.35;
+    // Smooth ramp: fully hidden behind globe (dot ≤ 0), fully visible above 0.25
+    // dot ≤ 0 means the point is on the back hemisphere — must hide
+    if (dot <= 0) return 0;
+    if (dot >= 0.25) return 1;
+    // Smooth hermite interpolation at the limb
+    const t = dot / 0.25;
     return t * t * (3 - 2 * t);
   }
 
@@ -227,14 +227,14 @@ export class RainEffect {
 
       // Check visibility
       const vis = this.globeVisibility(lon, lat);
-      if (vis < 0.1) continue; // don't spawn invisible drops
+      if (vis < 0.05) continue; // don't spawn behind globe
 
       const maxAge = 60 + Math.floor(Math.random() * 60);
       this.drops.push({
         lon, lat,
         fall: Math.random() * 0.3, // stagger start
-        speed: 0.015 + Math.random() * 0.02 + cell.intensity * 0.01,
-        length: 0.4 + Math.random() * 0.6 + cell.intensity * 0.4,
+        speed: 0.012 + Math.random() * 0.015 + cell.intensity * 0.008,
+        length: 0.3 + Math.random() * 0.4 + cell.intensity * 0.3,
         intensity: cell.intensity,
         age: 0,
         maxAge,
@@ -347,7 +347,7 @@ export class RainEffect {
       let rdx = 0, rdy = 1;
       if (gDist > 2) { rdx = -gdx / gDist; rdy = -gdy / gDist; }
 
-      const sl = d.length * sz * 14;
+      const sl = d.length * sz * 8;
       const headOffset = d.fall * sl;
       const tailOffset = (d.fall - 1) * sl;
       const hx = pt.x + rdx * headOffset;
@@ -385,7 +385,7 @@ export class RainEffect {
         this.ctx.moveTo(segs[j], segs[j + 1]);
         this.ctx.lineTo(segs[j + 2], segs[j + 3]);
       }
-      this.ctx.lineWidth = (0.5 + b * 0.35) * sz;
+      this.ctx.lineWidth = (0.3 + b * 0.2) * sz;
       this.ctx.strokeStyle = `rgba(${r},${g},${bl},${a})`;
       this.ctx.stroke();
     }
