@@ -36,6 +36,26 @@ async function init() {
     maxPitch: 80,
     attributionControl: false,
     renderWorldCopies: false,
+    transformRequest: (url, resourceType) => {
+      // Cap RainViewer tile requests at z10 — force parent tile at max zoom
+      // so MapLibre upscales instead of requesting non-existent tiles
+      if (resourceType === 'Tile' && url.includes('rainviewer.com')) {
+        const match = url.match(/\/(\d+)\/(\d+)\/(\d+)\.png/);
+        if (match) {
+          const z = parseInt(match[1]);
+          const x = parseInt(match[2]);
+          const y = parseInt(match[3]);
+          if (z > 10) {
+            const scale = 1 << (z - 10);
+            const cx = Math.floor(x / scale);
+            const cy = Math.floor(y / scale);
+            const capped = url.replace(`/${z}/${x}/${y}.png`, `/10/${cx}/${cy}.png`);
+            return { url: capped };
+          }
+        }
+      }
+      return { url };
+    },
   });
 
   // Globe projection
