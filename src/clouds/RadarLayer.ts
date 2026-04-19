@@ -110,8 +110,10 @@ export class RadarLayer {
             paint: {
               'raster-opacity': 0.55,
               'raster-fade-duration': 0,
-              'raster-resampling': 'linear', // smooth upscale when zoomed past max
+              'raster-resampling': 'linear', // bilinear upscale when past maxzoom
               'raster-hue-rotate': 0,
+              'raster-contrast': 0.1,        // slight contrast boost for upscaled tiles
+              'raster-brightness-min': 0.02,  // hide near-black noise from upscaling
             },
           });
 

@@ -10,7 +10,6 @@ import type { WeatherManager } from '../weather/WeatherManager';
 
 const TOTAL_DROPS = 30000;
 const MAX_DRAWN = 15000;
-const ALTITUDE_OFFSET = 0.003; // ~190m above surface for streak projection
 
 // Intensity bins for color-batched rendering
 const NUM_BINS = 5;
@@ -70,6 +69,9 @@ export class RainEffect {
     this.weather.on('dataLoaded', () => this.updatePrecipGrid());
     this.weather.on('timeChange', () => this.updatePrecipGrid());
     this.weather.on('levelChange', () => this.updatePrecipGrid());
+
+    // Try to populate immediately in case data is already loaded
+    this.updatePrecipGrid();
   }
 
   private resize(): void {
@@ -102,8 +104,8 @@ export class RainEffect {
     this.precipGrid = new Float32Array(width * height);
 
     for (let i = 0; i < width * height; i++) {
-      const cloud = fields.cloudFraction?.[i] ?? 0;
-      const humidity = fields.humidity?.[i] ?? 0;
+      const cloud = fields.cloudFraction?.[i] ?? 0;  // 0–1
+      const humidity = (fields.humidity?.[i] ?? 50) / 100;  // 0–100 → 0–1
 
       // Precipitation = cloud cover weighted by excess humidity
       // Only thick clouds with high humidity produce rain
@@ -170,22 +172,25 @@ export class RainEffect {
   }
 
   /**
-   * Get rain streak direction in screen space — perpendicular to globe surface.
-   * Projects a point at the surface and a point slightly below it (toward center).
-   * The screen-space vector between them is the "down toward center" direction.
+   * Get rain direction in screen space — toward globe center.
+   * "Perpendicular to surface" on a sphere = radial inward.
+   * Direction = from surface point toward map center in screen space.
    */
-  private getSurfaceNormalScreen(lon: number, lat: number): { dx: number; dy: number } | null {
-    // Project point at surface (altitude=0) and point below surface (negative altitude)
-    const ptSurface = this.map.project([lon, lat] as any);
-    const ptBelow = this.map.project({ lng: lon, lat, alt: -ALTITUDE_OFFSET } as any);
+  private getRainDirection(lon: number, lat: number): { dx: number; dy: number } | null {
+    const pt = this.map.project([lon, lat] as any);
+    if (!pt) return null;
 
-    if (!ptSurface || !ptBelow) return null;
+    // Globe center in screen space = project the map center
+    const center = this.map.getCenter();
+    const centerPt = this.map.project([center.lng, center.lat] as any);
+    if (!centerPt) return null;
 
-    const dx = ptBelow.x - ptSurface.x;
-    const dy = ptBelow.y - ptSurface.y;
+    // Direction from surface point toward center = "down toward earth"
+    const dx = centerPt.x - pt.x;
+    const dy = centerPt.y - pt.y;
     const len = Math.sqrt(dx * dx + dy * dy);
 
-    if (len < 0.1) return null; // degenerate (looking straight down at the point)
+    if (len < 1) return null; // looking straight at the point
 
     return { dx: dx / len, dy: dy / len };
   }
@@ -260,7 +265,7 @@ export class RainEffect {
 
       // Sample precipitation
       const precip = this.samplePrecip(drop.lon, drop.lat);
-      if (precip < 0.08) continue;
+      if (precip < 0.02) continue;
 
       // Intensity bin
       drop.intensity = Math.min(NUM_BINS - 1, Math.floor(precip * NUM_BINS));
@@ -279,8 +284,8 @@ export class RainEffect {
       const pt = this.map.project([drop.lon, drop.lat] as any);
       if (!pt) continue;
 
-      // Get perpendicular-to-surface direction in screen space
-      const normal = this.getSurfaceNormalScreen(drop.lon, drop.lat);
+      // Get perpendicular-to-surface direction (toward globe center)
+      const normal = this.getRainDirection(drop.lon, drop.lat);
       if (!normal) continue;
 
       // Wind lean — shift rain direction slightly downwind
