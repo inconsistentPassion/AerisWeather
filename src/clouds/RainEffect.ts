@@ -181,43 +181,109 @@ export class RainEffect {
 
   // ── Occlusion ───────────────────────────────────────────────────────
 
+  // ── Globe occlusion (exact MapLibre clipping-plane algorithm) ────────
+  // Source: maplibre-gl-js src/geo/projection/vertical_perspective_transform.ts
+  // Computes the tangent clipping plane from camera to globe, then tests
+  // each rain point's surface vector against it. dot < 0 = occluded.
+
+  private _clipPlane: [number, number, number, number] = [0, 0, 1, 0];
+  private _clipPlaneDirty = true;
+  private _clipPlaneCenter = { lat: 0, lng: 0, bearing: 0, pitch: 0 };
+
+  /** Recompute clipping plane only when camera moves. */
+  private updateClipPlane(): void {
+    const center = this.map.getCenter();
+    const pitch = this.map.getPitch() * Math.PI / 180;
+    const bearing = this.map.getBearing() * Math.PI / 180;
+
+    // Skip if camera hasn't changed
+    if (
+      !this._clipPlaneDirty &&
+      center.lat === this._clipPlaneCenter.lat &&
+      center.lng === this._clipPlaneCenter.lng &&
+      bearing === this._clipPlaneCenter.bearing &&
+      pitch === this._clipPlaneCenter.pitch
+    ) return;
+
+    this._clipPlaneCenter = { lat: center.lat, lng: center.lng, bearing, pitch };
+    this._clipPlaneDirty = false;
+
+    // Globe radius in pixels at current zoom/center (MapLibre formula)
+    const worldSize = this.map.getCanvas().width / Math.pow(2, this.map.getZoom()) * 256;
+    const globeRadiusPixels = worldSize / (2 * Math.PI);
+    const cameraToCenterDistance = 0.5 / Math.tan(((this.map as any).transform.fov / 2) * Math.PI / 180) * this.map.getCanvas().height;
+
+    // Scale to unit sphere
+    const distanceCameraToB = cameraToCenterDistance / globeRadiusPixels;
+    const distanceCameraToA = Math.sin(pitch) * distanceCameraToB;
+    const distanceAtoC = Math.cos(pitch) * distanceCameraToB + 1;
+    const distanceCameraToC = Math.sqrt(distanceCameraToA * distanceCameraToA + distanceAtoC * distanceAtoC);
+    const tangentPlaneDist = (1 / distanceCameraToC);
+
+    // Normalized direction from globe center to camera
+    let vx = -distanceCameraToA;
+    let vy = distanceAtoC;
+    const vlen = Math.sqrt(vx * vx + vy * vy);
+    vx /= vlen;
+    vy /= vlen;
+
+    // MapLibre coordinate system: plane vector [0, vx, vy] in camera-local space
+    // Transform to world space by rotating: Z(bear) → X(lat) → Y(lng)
+    let px = 0, py = vx, pz = vy;
+
+    // Rotate around Z axis by -bearing
+    const cosB = Math.cos(-bearing), sinB = Math.sin(-bearing);
+    let t1x = px * cosB - py * sinB;
+    let t1y = px * sinB + py * cosB;
+    let t1z = pz;
+
+    // Rotate around X axis by -centerLat
+    const lat = center.lat * Math.PI / 180;
+    const cosL = Math.cos(-lat), sinL = Math.sin(-lat);
+    let t2x = t1x;
+    let t2y = t1y * cosL - t1z * sinL;
+    let t2z = t1y * sinL + t1z * cosL;
+
+    // Rotate around Y axis by centerLng
+    const lng = center.lng * Math.PI / 180;
+    const cosG = Math.cos(lng), sinG = Math.sin(lng);
+    const fnx = t2x * cosG + t2z * sinG;
+    const fny = t2y;
+    const fnz = -t2x * sinG + t2z * cosG;
+
+    // Normalize
+    const fnlen = Math.sqrt(fnx * fnx + fny * fny + fnz * fnz);
+    this._clipPlane = [
+      fnx / fnlen,
+      fny / fnlen,
+      fnz / fnlen,
+      -tangentPlaneDist / fnlen,
+    ];
+  }
+
   /**
-   * Globe visibility factor for a point.
-   * Returns 0 (fully hidden / back side) to 1 (fully visible / center).
-   *
-   * Converts lat/lon to a 3D surface normal, rotates it by the same
-   * view transform MapLibre uses (bearing then pitch), and checks the
-   * resulting depth. Points with negative depth are behind the globe.
+   * Globe visibility for a lat/lon point.
+   * Returns 0 (fully occluded) to 1 (fully visible).
+   * Uses MapLibre's own clipping-plane math so it matches exactly.
    */
   private globeVisibility(lon: number, lat: number): number {
+    this.updateClipPlane();
+
+    // Convert lat/lon to unit sphere surface point
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
+    const sx = Math.cos(pLat) * Math.cos(pLon);
+    const sy = Math.sin(pLat);
+    const sz = Math.cos(pLat) * Math.sin(pLon);
 
-    // Unit sphere surface normal at this lat/lon
-    const nx = Math.cos(pLat) * Math.cos(pLon);
-    const ny = Math.sin(pLat);
-    const nz = Math.cos(pLat) * Math.sin(pLon);
+    // Plane test: dot(plane, point) < 0 → occluded
+    const [px, py, pz, pw] = this._clipPlane;
+    const dot = px * sx + py * sy + pz * sz + pw;
 
-    // View rotation: MapLibre globe rotates by bearing around Y, then pitch around X
-    const bearing = this.map.getBearing() * Math.PI / 180;
-    const pitch = this.map.getPitch() * Math.PI / 180;
-
-    // Bearing rotation (around Y axis — north pole)
-    const cosB = Math.cos(bearing), sinB = Math.sin(bearing);
-    const rx = nx * cosB + nz * sinB;
-    const ry = ny;
-    const rz = -nx * sinB + nz * cosB;
-
-    // Pitch rotation (around X axis)
-    const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
-    const depth = -ry * sinP + rz * cosP;
-
-    // depth > 0 = facing camera (front hemisphere)
-    // depth ≤ 0 = behind globe (back hemisphere)
-    if (depth <= 0) return 0;
-    if (depth >= 0.2) return 1;
-    // Smooth limb fade
-    const t = depth / 0.2;
+    if (dot < 0) return 0;
+    if (dot > 0.08) return 1;
+    // Smooth fade at limb
+    const t = dot / 0.08;
     return t * t * (3 - 2 * t);
   }
 
