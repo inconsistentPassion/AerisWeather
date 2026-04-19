@@ -1,8 +1,9 @@
 /**
  * RainEffect — Radar-driven rain overlay on the MapLibre globe.
  *
- * Rain falls vertically in screen space (straight down on screen).
- * Density scales with RainViewer radar alpha intensity.
+ * Rain falls TOWARD the globe center in screen space (radial gravity).
+ * Stays within the globe's projected circle on screen.
+ * Driven by RainViewer radar intensity data.
  */
 
 import maplibregl from 'maplibre-gl';
@@ -13,11 +14,11 @@ const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 
 const NUM_BINS = 5;
 const BIN_COLORS: [number, number, number, number][] = [
-  [80, 130, 200, 0.18],
-  [120, 170, 230, 0.28],
-  [160, 210, 250, 0.38],
-  [200, 230, 255, 0.48],
-  [240, 248, 255, 0.58],
+  [80, 130, 200, 0.22],
+  [120, 170, 230, 0.32],
+  [160, 210, 250, 0.42],
+  [200, 230, 255, 0.52],
+  [240, 248, 255, 0.62],
 ];
 
 interface Drop {
@@ -99,10 +100,13 @@ export class RainEffect {
       if (newPath === this.latestTileUrl) return;
       this.latestTileUrl = newPath;
 
+      // Build z2 tile URLs: 4 columns x 2 rows
+      // RainViewer format: {host}{path}/256/{z}/{x}/{y}/{color}/{options}.png
+      const basePath = newPath; // includes /256
       const tileUrls: string[] = [];
       for (let y = 0; y < 2; y++) {
         for (let x = 0; x < 4; x++) {
-          tileUrls.push(`${newPath}/2/2/${x}/${y}/2/1_1.png`);
+          tileUrls.push(`${basePath}/2/2/${x}/${y}/2/1_1.png`);
         }
       }
 
@@ -162,16 +166,6 @@ export class RainEffect {
            this.radarAlpha[i11] * fx * fy;
   }
 
-  private isFrontSide(lon: number, lat: number): boolean {
-    const c = this.map.getCenter();
-    const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
-    const pLat = lat * Math.PI / 180;
-    const pLon = lon * Math.PI / 180;
-    return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
-  }
-
   start(): void {
     if (this.animId !== null) return;
     this.visible = true;
@@ -210,6 +204,20 @@ export class RainEffect {
     const ch = this.canvas.height / dpr;
     this.ctx.clearRect(0, 0, cw, ch);
 
+    // ── Globe center in screen space ─────────────────────────────
+    // Project the globe's sub-camera point (center of visible disc)
+    // Use the map center as proxy for globe center screen position
+    const center = this.map.getCenter();
+    const centerPt = this.map.project([center.lng, center.lat]);
+    const globeCenterX = centerPt.x;
+    const globeCenterY = centerPt.y;
+
+    // Estimate globe radius on screen by projecting a point on the edge
+    const zoom = this.map.getZoom();
+    // At zoom 1.8 the globe fills most of the screen
+    // Globe radius in screen pixels scales with zoom
+    const globeScreenRadius = Math.min(cw, ch) * 0.45 * Math.pow(2, zoom - 1.8);
+
     const bounds = this.map.getBounds();
     const vpW = bounds.getWest(), vpE = bounds.getEast();
     const vpS = bounds.getSouth(), vpN = bounds.getNorth();
@@ -223,7 +231,6 @@ export class RainEffect {
     }
 
     let drawn = 0;
-    const zoom = this.map.getZoom();
     const sizeScale = Math.max(0.5, Math.min(2, zoom / 5));
 
     for (let i = 0; i < this.drops.length && drawn < MAX_DRAWN; i++) {
@@ -249,26 +256,48 @@ export class RainEffect {
         inView = drop.lon >= vpW - 3 && drop.lon <= vpE + 3;
       }
       if (!inView || drop.lat < vpS - 3 || drop.lat > vpN + 3) continue;
-      if (!this.isFrontSide(drop.lon, drop.lat)) continue;
 
       const pt = this.map.project([drop.lon, drop.lat] as any);
       if (!pt) continue;
 
-      // Rain falls straight down in screen space
-      const streakLen = drop.length * sizeScale * 12;
-      const headY = pt.y + drop.fall * streakLen;
-      const tailY = pt.y + (drop.fall - 1) * streakLen;
+      // ── Check if point is inside the globe disc on screen ───────
+      const dxFromCenter = pt.x - globeCenterX;
+      const dyFromCenter = pt.y - globeCenterY;
+      const distFromCenter = Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
+      if (distFromCenter > globeScreenRadius) continue; // behind globe edge
 
-      // Skip if streak is off-screen vertically
-      if (tailY > ch + 20 || headY < -20) continue;
+      // ── Rain direction: toward globe center (radial gravity) ────
+      const dirX = -dxFromCenter / distFromCenter; // toward center
+      const dirY = -dyFromCenter / distFromCenter;
+
+      // Fallback for points very close to center
+      const rdx = distFromCenter > 1 ? dirX : 0;
+      const rdy = distFromCenter > 1 ? dirY : 1; // default down
+
+      const streakLen = drop.length * sizeScale * 12;
+      const headOff = drop.fall * streakLen;
+      const tailOff = (drop.fall - 1) * streakLen;
+
+      const headX = pt.x + rdx * headOff;
+      const headY = pt.y + rdy * headOff;
+      const tailX = pt.x + rdx * tailOff;
+      const tailY = pt.y + rdy * tailOff;
+
+      // Skip degenerate
+      const sdx = headX - tailX, sdy = headY - tailY;
+      if (sdx * sdx + sdy * sdy > 200 * 200) continue;
+
+      // Skip if off-screen
+      if (headY < -20 || headY > ch + 20 || tailY < -20 || tailY > ch + 20) continue;
+      if (headX < -20 || headX > cw + 20 || tailX < -20 || tailX > cw + 20) continue;
 
       const bin = Math.min(NUM_BINS - 1, Math.floor(intensity * NUM_BINS));
       const segs = binSegs[bin];
       let sc = binCounts[bin];
       if (sc >= maxSegs - 4) continue;
 
-      segs[sc++] = pt.x; segs[sc++] = tailY;
-      segs[sc++] = pt.x; segs[sc++] = headY;
+      segs[sc++] = tailX; segs[sc++] = tailY;
+      segs[sc++] = headX; segs[sc++] = headY;
       binCounts[bin] = sc;
       drawn++;
     }
