@@ -90,9 +90,12 @@ export async function fetchRealWeatherGrid(): Promise<{
 
     for (let i = 0; i < points.length; i += MAX_PER_CALL) {
       const batch = points.slice(i, i + MAX_PER_CALL);
+      console.log(`[OpenMeteo] Fetching batch ${Math.floor(i / MAX_PER_CALL) + 1}/${Math.ceil(points.length / MAX_PER_CALL)} (${batch.length} points)`);
       const batchData = await fetchBatch(batch);
       if (batchData) {
         allData.push(...batchData);
+      } else {
+        console.warn(`[OpenMeteo] Batch ${Math.floor(i / MAX_PER_CALL) + 1} returned null`);
       }
       // Small delay between batches to avoid rate limiting
       if (i + MAX_PER_CALL < points.length) {
@@ -100,6 +103,7 @@ export async function fetchRealWeatherGrid(): Promise<{
       }
     }
 
+    console.log(`[OpenMeteo] Fetched ${allData.length}/${points.length} points total`);
     if (allData.length === 0) {
       console.warn('[OpenMeteo] No data received');
       return null;
@@ -144,7 +148,7 @@ async function fetchBatch(
       'cloud_cover',
     ].join(','),
     wind_speed_unit: 'ms',
-    timezone: 'auto',
+    timezone: 'GMT',
   });
 
   const url = `${API_BASE}?${params.toString()}`;
@@ -152,7 +156,8 @@ async function fetchBatch(
   try {
     const res = await fetch(url);
     if (!res.ok) {
-      console.warn(`[OpenMeteo] HTTP ${res.status}`);
+      const body = await res.text().catch(() => '');
+      console.warn(`[OpenMeteo] HTTP ${res.status}: ${body.slice(0, 200)}`);
       return null;
     }
 
@@ -201,8 +206,8 @@ async function fetchBatch(
     }
 
     return results;
-  } catch (e) {
-    console.warn('[OpenMeteo] Batch fetch error:', e);
+  } catch (e: any) {
+    console.warn('[OpenMeteo] Batch fetch error:', e?.message || e, url.slice(0, 100));
     return null;
   }
 }
