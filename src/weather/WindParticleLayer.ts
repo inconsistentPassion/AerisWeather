@@ -277,10 +277,9 @@ export class WindParticleLayer {
       if (!this.isFrontSide(this.lon[i], this.lat[i])) continue;
 
       /* project trail — reuse pre-allocated buffers */
-      const transform = (this.map as any).transform;
       for (let t = 0; t < TRAIL_LEN; t++) {
         const slot = (h + t) % TRAIL_LEN;
-        const pt = transform.project(this.trailLon[tb + slot], this.trailLat[tb + slot]);
+        const pt = this.map.project([this.trailLon[tb + slot], this.trailLat[tb + slot]]);
         this.projX[t] = pt.x; this.projY[t] = pt.y;
       }
       const px = this.projX;

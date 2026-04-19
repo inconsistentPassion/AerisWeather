@@ -3,113 +3,20 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Three.js        → volumetric clouds (shared GL context via custom layer)
  * Custom layers   → wind particles, radar, rain, atmosphere glow
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
-import * as THREE from 'three';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
 import { RainEffect } from './clouds/RainEffect';
-import { CloudRenderer } from './clouds/CloudRenderer';
 import { createAtmosphereLayer } from './scene/AtmosphereLayer';
 
 // ── Mapbox-inspired dark style with enhanced terrain ────────────────
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
-
-// ── Mapbox-style atmosphere colors ──────────────────────────────────
-const ATMOSPHERE_COLORS = {
-  skyDay: [0.35, 0.55, 0.85],     // Soft blue
-  skyNight: [0.02, 0.02, 0.06],   // Near black
-  horizon: [0.6, 0.7, 0.9],       // Light blue haze at horizon
-  sunset: [1.0, 0.45, 0.2],       // Warm orange at terminator
-  sunGlow: [1.0, 0.95, 0.85],     // Bright white-yellow sun
-};
-
-/**
- * Create a MapLibre custom layer that renders Three.js volumetric clouds
- * using the shared WebGL context for perfect overlay alignment.
- */
-function createCloudCustomLayer(weather: WeatherManager): maplibregl.CustomLayerInterface {
-  let renderer: THREE.WebGLRenderer | null = null;
-  let scene: THREE.Scene | null = null;
-  let camera: THREE.PerspectiveCamera | null = null;
-  let cloudParent: THREE.Object3D | null = null;
-  let cloudRenderer: CloudRenderer | null = null;
-
-  return {
-    id: 'three-clouds',
-    type: 'custom',
-    renderingMode: '3d',
-
-    onAdd(mapInstance: maplibregl.Map, gl: WebGLRenderingContext) {
-      renderer = new THREE.WebGLRenderer({
-        canvas: mapInstance.getCanvas(),
-        context: gl,
-        antialias: true,
-        alpha: true,
-      });
-      renderer.autoClear = false; // Don't clear MapLibre's framebuffer
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera();
-
-      cloudParent = new THREE.Object3D();
-      scene.add(cloudParent);
-
-      // Create volumetric cloud renderer
-      cloudRenderer = new CloudRenderer(cloudParent, weather);
-
-      // Lighting for cloud shading
-      const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
-      sun.position.set(1, 0.5, -0.3);
-      scene.add(sun);
-      scene.add(new THREE.AmbientLight(0xffffff, 0.3));
-
-      console.log('[Clouds] Volumetric cloud renderer initialized');
-    },
-
-    render(_gl: WebGLRenderingContext, args: any) {
-      if (!renderer || !scene || !camera || !cloudParent) return;
-
-      // Sync camera with MapLibre's native GL matrices
-      const mainMatrix: number[] = args?.defaultProjectionData?.mainMatrix;
-      if (mainMatrix && mainMatrix.length === 16) {
-        camera.projectionMatrix.fromArray(mainMatrix);
-        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-        camera.position.set(0, 0, 0);
-        camera.quaternion.identity();
-        camera.scale.set(1, 1, 1);
-        camera.updateMatrixWorld(true);
-      }
-
-      // Slow cloud rotation (wind drift simulation)
-      cloudParent.rotation.y = performance.now() * 0.001 * 0.008;
-
-      if (cloudRenderer) {
-        cloudRenderer.update(1 / 60, { threeCamera: camera });
-      }
-
-      // Render Three.js on top of MapLibre
-      renderer.state.reset();
-      renderer.render(scene, camera);
-    },
-
-    onRemove() {
-      if (renderer) renderer.dispose();
-      renderer = null;
-      scene = null;
-      camera = null;
-      cloudParent = null;
-      cloudRenderer = null;
-    },
-  };
-}
 
 async function init() {
   const container = document.getElementById('app')!;
@@ -232,16 +139,6 @@ async function init() {
     console.log('[Hillshade] Terrain relief shading enabled');
   } catch (e) {
     console.warn('[Terrain] Failed:', e);
-  }
-
-  // ── Volumetric clouds (Three.js custom layer) ──────────────────────
-  // This renders ray-marched volumetric clouds using MapLibre's shared GL context
-  try {
-    const cloudLayer = createCloudCustomLayer(weather);
-    map.addLayer(cloudLayer);
-    console.log('[Clouds] Volumetric cloud layer added');
-  } catch (e) {
-    console.warn('[Clouds] Failed to add:', e);
   }
 
   // ── Suppress non-critical tile errors ──────────────────────────────
