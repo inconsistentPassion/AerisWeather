@@ -1,9 +1,9 @@
 /**
  * RainEffect — Radar-driven rain overlay on the MapLibre globe.
  *
- * Rain falls TOWARD the globe center in screen space (radial gravity).
- * Stays within the globe's projected circle on screen.
- * Driven by RainViewer radar intensity data.
+ * Rain falls TOWARD the globe's visible disc center in screen space.
+ * Intensity driven by RainViewer radar tile luminance (RGB + alpha).
+ * Only renders where radar shows precipitation.
  */
 
 import maplibregl from 'maplibre-gl';
@@ -38,7 +38,8 @@ export class RainEffect {
   private drops: Drop[] = [];
   private visible = false;
 
-  private radarAlpha: Float32Array | null = null;
+  // Radar intensity grid (sampled from tile RGB luminance × alpha)
+  private radarIntensity: Float32Array | null = null;
   private radarW = 512;
   private radarH = 256;
   private latestTileUrl = '';
@@ -100,13 +101,12 @@ export class RainEffect {
       if (newPath === this.latestTileUrl) return;
       this.latestTileUrl = newPath;
 
-      // Build z2 tile URLs: 4 columns x 2 rows
+      // Build z2 tile URLs: 4 columns × 2 rows
       // RainViewer format: {host}{path}/256/{z}/{x}/{y}/{color}/{options}.png
-      const basePath = newPath; // includes /256
       const tileUrls: string[] = [];
       for (let y = 0; y < 2; y++) {
         for (let x = 0; x < 4; x++) {
-          tileUrls.push(`${basePath}/2/2/${x}/${y}/2/1_1.png`);
+          tileUrls.push(`${newPath}/2/2/${x}/${y}/2/1_1.png`);
         }
       }
 
@@ -135,20 +135,34 @@ export class RainEffect {
         offCtx.drawImage(img, col * tileW, row * tileH, tileW, tileH);
       });
 
+      // Sample BOTH RGB luminance and alpha for intensity
+      // RainViewer encodes intensity in color (green=light → red=heavy) AND alpha
       const imageData = offCtx.getImageData(0, 0, this.radarW, this.radarH);
-      this.radarAlpha = new Float32Array(this.radarW * this.radarH);
+      this.radarIntensity = new Float32Array(this.radarW * this.radarH);
+      let nonZero = 0;
       for (let i = 0; i < this.radarW * this.radarH; i++) {
-        this.radarAlpha[i] = imageData.data[i * 4 + 3] / 255;
+        const r = imageData.data[i * 4];
+        const g = imageData.data[i * 4 + 1];
+        const b = imageData.data[i * 4 + 2];
+        const a = imageData.data[i * 4 + 3];
+
+        // Perceived brightness of the RGB color (0-255 → 0-1)
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        // Combine: intensity = how bright AND how opaque
+        // More opaque + brighter color = heavier precipitation
+        const intensity = luminance * (a / 255);
+        this.radarIntensity[i] = intensity;
+        if (intensity > 0.02) nonZero++;
       }
 
-      console.log('[Rain] Radar data loaded:', this.radarW + '×' + this.radarH);
+      console.log(`[Rain] Radar loaded: ${this.radarW}×${this.radarH}, ${nonZero} pixels with data`);
     } catch (e) {
       console.warn('[Rain] Radar fetch failed:', e);
     }
   }
 
   private sampleRadar(lon: number, lat: number): number {
-    if (!this.radarAlpha) return 0;
+    if (!this.radarIntensity) return 0;
     const normLon = ((lon + 180) % 360 + 360) % 360;
     const x = (normLon / 360) * this.radarW;
     const y = ((90 - lat) / 180) * this.radarH;
@@ -160,10 +174,10 @@ export class RainEffect {
     const fy = y - Math.floor(y);
     const i00 = y0 * this.radarW + x0, i01 = y0 * this.radarW + x1;
     const i10 = y1 * this.radarW + x0, i11 = y1 * this.radarW + x1;
-    return this.radarAlpha[i00] * (1-fx) * (1-fy) +
-           this.radarAlpha[i01] * fx * (1-fy) +
-           this.radarAlpha[i10] * (1-fx) * fy +
-           this.radarAlpha[i11] * fx * fy;
+    return this.radarIntensity[i00] * (1-fx) * (1-fy) +
+           this.radarIntensity[i01] * fx * (1-fy) +
+           this.radarIntensity[i10] * (1-fx) * fy +
+           this.radarIntensity[i11] * fx * fy;
   }
 
   start(): void {
@@ -204,19 +218,25 @@ export class RainEffect {
     const ch = this.canvas.height / dpr;
     this.ctx.clearRect(0, 0, cw, ch);
 
-    // ── Globe center in screen space ─────────────────────────────
-    // Project the globe's sub-camera point (center of visible disc)
-    // Use the map center as proxy for globe center screen position
-    const center = this.map.getCenter();
-    const centerPt = this.map.project([center.lng, center.lat]);
-    const globeCenterX = centerPt.x;
-    const globeCenterY = centerPt.y;
-
-    // Estimate globe radius on screen by projecting a point on the edge
     const zoom = this.map.getZoom();
-    // At zoom 1.8 the globe fills most of the screen
-    // Globe radius in screen pixels scales with zoom
-    const globeScreenRadius = Math.min(cw, ch) * 0.45 * Math.pow(2, zoom - 1.8);
+    const pitch = this.map.getPitch() * Math.PI / 180;
+
+    // ── Find the globe disc center on screen ─────────────────────
+    // The map center always projects to screen center, but the actual
+    // visible globe disc center shifts with pitch.
+    // At pitch 0: disc center = screen center
+    // At pitch > 0: disc shifts down (toward camera nadir)
+    const screenCenterX = cw / 2;
+    const screenCenterY = ch / 2;
+
+    // Globe radius on screen (empirically: ~40% of min dimension at zoom 2)
+    const zoomScale = Math.pow(2, zoom - 2.0);
+    const globeRadius = Math.min(cw, ch) * 0.38 * zoomScale;
+
+    // Disc center offset: camera tilts forward, globe shifts down on screen
+    // The offset is proportional to sin(pitch) × globeRadius
+    const discCenterX = screenCenterX;
+    const discCenterY = screenCenterY + Math.sin(pitch) * globeRadius * 0.6;
 
     const bounds = this.map.getBounds();
     const vpW = bounds.getWest(), vpE = bounds.getEast();
@@ -246,7 +266,7 @@ export class RainEffect {
       }
 
       const intensity = this.sampleRadar(drop.lon, drop.lat);
-      if (intensity < 0.05) continue;
+      if (intensity < 0.03) continue; // only rain where radar shows precipitation
 
       // Viewport cull
       let inView: boolean;
@@ -260,19 +280,18 @@ export class RainEffect {
       const pt = this.map.project([drop.lon, drop.lat] as any);
       if (!pt) continue;
 
-      // ── Check if point is inside the globe disc on screen ───────
-      const dxFromCenter = pt.x - globeCenterX;
-      const dyFromCenter = pt.y - globeCenterY;
-      const distFromCenter = Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
-      if (distFromCenter > globeScreenRadius) continue; // behind globe edge
+      // Check if inside the globe disc
+      const dxFromDisc = pt.x - discCenterX;
+      const dyFromDisc = pt.y - discCenterY;
+      const distFromDisc = Math.sqrt(dxFromDisc * dxFromDisc + dyFromDisc * dyFromDisc);
+      if (distFromDisc > globeRadius) continue; // behind globe edge
 
-      // ── Rain direction: toward globe center (radial gravity) ────
-      const dirX = -dxFromCenter / distFromCenter; // toward center
-      const dirY = -dyFromCenter / distFromCenter;
-
-      // Fallback for points very close to center
-      const rdx = distFromCenter > 1 ? dirX : 0;
-      const rdy = distFromCenter > 1 ? dirY : 1; // default down
+      // Rain direction: toward disc center (radial gravity toward earth)
+      let rdx = 0, rdy = 1; // default: straight down
+      if (distFromDisc > 2) {
+        rdx = -dxFromDisc / distFromDisc;
+        rdy = -dyFromDisc / distFromDisc;
+      }
 
       const streakLen = drop.length * sizeScale * 12;
       const headOff = drop.fall * streakLen;
@@ -283,11 +302,11 @@ export class RainEffect {
       const tailX = pt.x + rdx * tailOff;
       const tailY = pt.y + rdy * tailOff;
 
-      // Skip degenerate
+      // Skip degenerate streaks
       const sdx = headX - tailX, sdy = headY - tailY;
       if (sdx * sdx + sdy * sdy > 200 * 200) continue;
 
-      // Skip if off-screen
+      // Skip off-screen
       if (headY < -20 || headY > ch + 20 || tailY < -20 || tailY > ch + 20) continue;
       if (headX < -20 || headX > cw + 20 || tailX < -20 || tailX > cw + 20) continue;
 
