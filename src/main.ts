@@ -87,9 +87,7 @@ async function init() {
         5, 0.5,
         8, 0,
       ],
-      'fog-color': '#0a0f1e',
-      'fog-ground-blend': 0.3,
-      'horizon-fog-blend': 0.4,
+      // fog-* properties omitted — calculateFogMatrix unsupported on globe
     });
     console.log('[Sky] Atmosphere enabled');
   } catch (e) {

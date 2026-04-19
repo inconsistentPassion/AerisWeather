@@ -75,14 +75,14 @@ export class WeatherManager {
     
     this.setLoading(false);
 
-    // Refresh from Open-Meteo every 15 minutes
+    // Refresh from Open-Meteo every 30 minutes (matches cache duration)
     setInterval(async () => {
       const fresh = await fetchRealWeatherGrid();
       if (fresh) {
         this.grids.set('surface', fresh);
         this.emit('dataLoaded', { level: 'surface' });
       }
-    }, 15 * 60 * 1000);
+    }, 30 * 60 * 1000);
   }
 
   /**
