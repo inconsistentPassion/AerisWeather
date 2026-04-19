@@ -14,8 +14,8 @@ const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 // 10° = 36×18 = 648 points → ~26 API calls of 25 points each
 const SAMPLE_STEP = 10;
 
-// Maximum coordinates per API call (Open-Meteo supports up to ~100)
-const MAX_PER_CALL = 50;
+// Maximum coordinates per API call
+const MAX_PER_CALL = 25;
 
 // Cache duration (15 minutes — Open-Meteo updates hourly)
 const CACHE_MS = 15 * 60 * 1000;
@@ -88,18 +88,35 @@ export async function fetchRealWeatherGrid(): Promise<{
       cloudCover: number;
     }> = [];
 
+    const totalBatches = Math.ceil(points.length / MAX_PER_CALL);
     for (let i = 0; i < points.length; i += MAX_PER_CALL) {
       const batch = points.slice(i, i + MAX_PER_CALL);
-      console.log(`[OpenMeteo] Fetching batch ${Math.floor(i / MAX_PER_CALL) + 1}/${Math.ceil(points.length / MAX_PER_CALL)} (${batch.length} points)`);
-      const batchData = await fetchBatch(batch);
+      const batchNum = Math.floor(i / MAX_PER_CALL) + 1;
+
+      // Retry with backoff on 429
+      let retries = 0;
+      let batchData = null;
+      while (retries < 3) {
+        console.log(`[OpenMeteo] Batch ${batchNum}/${totalBatches} (${batch.length} pts)${retries > 0 ? ` retry ${retries}` : ''}`);
+        batchData = await fetchBatch(batch);
+        if (batchData) break;
+
+        // Check if we got rate-limited — back off
+        retries++;
+        const backoff = 1000 * retries * retries; // 1s, 4s, 9s
+        console.warn(`[OpenMeteo] Batch ${batchNum} failed, waiting ${backoff}ms...`);
+        await new Promise(r => setTimeout(r, backoff));
+      }
+
       if (batchData) {
         allData.push(...batchData);
       } else {
-        console.warn(`[OpenMeteo] Batch ${Math.floor(i / MAX_PER_CALL) + 1} returned null`);
+        console.warn(`[OpenMeteo] Batch ${batchNum} failed after 3 retries`);
       }
-      // Small delay between batches to avoid rate limiting
+
+      // Respect rate limits: 500ms between successful requests
       if (i + MAX_PER_CALL < points.length) {
-        await new Promise(r => setTimeout(r, 20));
+        await new Promise(r => setTimeout(r, 500));
       }
     }
 
