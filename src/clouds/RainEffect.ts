@@ -1,18 +1,17 @@
 /**
  * RainEffect — Radar-driven rain overlay on the MapLibre globe.
  *
- * Samples the MapLibre canvas directly at rain drop positions to detect
- * radar precipitation. This avoids tile compositing/projection issues
- * entirely — the radar layer already renders correctly on the globe.
- *
- * Rain falls toward the globe's visible disc center in screen space.
+ * Downloads z1 world tiles from RainViewer (4 tiles covering the globe),
+ * composites into a single 512×256 intensity grid.
+ * Samples from this grid using lon/lat (same coordinate system as wind particles).
+ * Rain falls toward the globe disc center in screen space.
  */
 
 import maplibregl from 'maplibre-gl';
 
-const TOTAL_DROPS = 12000;
+const TOTAL_DROPS = 10000;
 const MAX_DRAWN = 6000;
-const SAMPLE_INTERVAL = 500; // ms between radar samples (expensive)
+const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 
 const NUM_BINS = 5;
 const BIN_COLORS: [number, number, number, number][] = [
@@ -29,8 +28,6 @@ interface Drop {
   fall: number;
   speed: number;
   length: number;
-  intensity: number; // cached radar intensity
-  intensityAge: number; // frames since last sample
 }
 
 export class RainEffect {
@@ -41,12 +38,13 @@ export class RainEffect {
   private resizeObs: ResizeObserver;
   private drops: Drop[] = [];
   private visible = false;
-  private lastSampleTime = 0;
 
-  // Offscreen canvas for sampling MapLibre's rendered output
-  private sampleCanvas: HTMLCanvasElement;
-  private sampleCtx: CanvasRenderingContext2D;
-  private sampleDirty = true;
+  // Radar intensity grid (equirectangular, lon/lat mapped)
+  private intensity: Float32Array | null = null;
+  private gridW = 512;
+  private gridH = 256;
+  private latestPath = '';
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(map: maplibregl.Map) {
     this.map = map;
@@ -60,20 +58,16 @@ export class RainEffect {
     map.getContainer().appendChild(this.canvas);
     this.ctx = this.canvas.getContext('2d', { alpha: true })!;
 
-    // Offscreen canvas for sampling the map's rendered pixels
-    this.sampleCanvas = document.createElement('canvas');
-    this.sampleCtx = this.sampleCanvas.getContext('2d', { willReadFrequently: true })!;
-
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(map.getContainer());
     this.resize();
 
-    // Mark sample dirty on every map render
-    map.on('render', () => { this.sampleDirty = true; });
-
     for (let i = 0; i < TOTAL_DROPS; i++) {
       this.drops.push(this.spawn());
     }
+
+    this.loadRadar();
+    this.refreshTimer = setInterval(() => this.loadRadar(), 10 * 60 * 1000);
   }
 
   private resize(): void {
@@ -82,12 +76,6 @@ export class RainEffect {
     this.canvas.width = r.width * d;
     this.canvas.height = r.height * d;
     this.ctx.setTransform(d, 0, 0, d, 0, 0);
-
-    // Match sample canvas to map canvas pixel dimensions
-    const mapCanvas = this.map.getCanvas();
-    this.sampleCanvas.width = mapCanvas.width;
-    this.sampleCanvas.height = mapCanvas.height;
-    this.sampleDirty = true;
   }
 
   private spawn(): Drop {
@@ -97,9 +85,110 @@ export class RainEffect {
       fall: Math.random(),
       speed: 0.012 + Math.random() * 0.018,
       length: 0.5 + Math.random() * 0.8,
-      intensity: 0,
-      intensityAge: 999,
     };
+  }
+
+  /**
+   * Load RainViewer z1 tiles (2×2 = 4 tiles covering the world).
+   * Each tile is 256×256. Composited into 512×512.
+   *
+   * RainViewer tile addressing matches standard slippy map tiles:
+   *   z=1, x=0..1, y=0..1
+   *   y=0 → north (lat 85°N to equator)
+   *   y=1 → south (equator to lat 85°S)
+   *
+   * We composite into a 512×256 equirectangular grid where:
+   *   grid y=0 → lat 90°N, grid y=256 → lat 90°S
+   *   grid x=0 → lon -180°, grid x=512 → lon 180°
+   */
+  private async loadRadar(): Promise<void> {
+    try {
+      const res = await fetch(RAINDVIEWER_API);
+      if (!res.ok) return;
+      const data = await res.json();
+      const host = data.host || 'https://tilecache.rainviewer.com';
+      const past = data.radar?.past || [];
+      if (!past.length) return;
+
+      const latest = past[past.length - 1];
+      const basePath = `${host}${latest.path}/256`;
+      if (basePath === this.latestPath) return;
+      this.latestPath = basePath;
+
+      // Download 4 z1 tiles: 2 columns × 2 rows
+      const urls = [
+        `${basePath}/1/0/0/2/1_1.png`, // NW
+        `${basePath}/1/1/0/2/1_1.png`, // NE
+        `${basePath}/1/0/1/2/1_1.png`, // SW
+        `${basePath}/1/1/1/2/1_1.png`, // SE
+      ];
+
+      const imgs = await Promise.all(urls.map(u =>
+        new Promise<HTMLImageElement | null>(r => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => r(img);
+          img.onerror = () => r(null);
+          img.src = u;
+        })
+      ));
+
+      // Composite into 512×256 equirectangular grid
+      const c = document.createElement('canvas');
+      c.width = this.gridW;
+      c.height = this.gridH;
+      const cx = c.getContext('2d')!;
+      cx.clearRect(0, 0, this.gridW, this.gridH);
+
+      const tw = this.gridW / 2; // 256
+      const th = this.gridH / 2; // 128
+
+      // Place tiles: x=0,y=0 → top-left (NW), etc.
+      if (imgs[0]) cx.drawImage(imgs[0], 0, 0, tw, th);       // NW
+      if (imgs[1]) cx.drawImage(imgs[1], tw, 0, tw, th);      // NE
+      if (imgs[2]) cx.drawImage(imgs[2], 0, th, tw, th);      // SW
+      if (imgs[3]) cx.drawImage(imgs[3], tw, th, tw, th);     // SE
+
+      // Extract intensity from RGB luminance × alpha
+      const pixels = cx.getImageData(0, 0, this.gridW, this.gridH).data;
+      this.intensity = new Float32Array(this.gridW * this.gridH);
+      let nonZero = 0;
+      for (let i = 0; i < this.gridW * this.gridH; i++) {
+        const r = pixels[i * 4];
+        const g = pixels[i * 4 + 1];
+        const b = pixels[i * 4 + 2];
+        const a = pixels[i * 4 + 3];
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const val = lum * (a / 255);
+        this.intensity[i] = val;
+        if (val > 0.02) nonZero++;
+      }
+      console.log(`[Rain] Radar: ${this.gridW}×${this.gridH}, ${nonZero} px`);
+    } catch (e) {
+      console.warn('[Rain] Load failed:', e);
+    }
+  }
+
+  /**
+   * Sample radar intensity at lon/lat.
+   * Grid mapping:
+   *   x = (lon + 180) / 360 * gridW
+   *   y = (90 - lat) / 180 * gridH
+   * Same convention as wind's 360×180 grid.
+   */
+  private sample(lon: number, lat: number): number {
+    if (!this.intensity) return 0;
+    const nx = ((lon + 180) / 360) * this.gridW;
+    const ny = ((90 - lat) / 180) * this.gridH;
+    const x0 = Math.floor(nx) % this.gridW;
+    const y0 = Math.max(0, Math.min(this.gridH - 1, Math.floor(ny)));
+    const x1 = (x0 + 1) % this.gridW;
+    const y1 = Math.min(this.gridH - 1, y0 + 1);
+    const fx = nx - Math.floor(nx);
+    const fy = ny - Math.floor(ny);
+    const i = this.gridW;
+    return this.intensity[y0*i+x0]*(1-fx)*(1-fy) + this.intensity[y0*i+x1]*fx*(1-fy) +
+           this.intensity[y1*i+x0]*(1-fx)*fy + this.intensity[y1*i+x1]*fx*fy;
   }
 
   start(): void {
@@ -122,6 +211,7 @@ export class RainEffect {
 
   destroy(): void {
     this.stop();
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.resizeObs.disconnect();
     this.canvas.remove();
   }
@@ -129,38 +219,6 @@ export class RainEffect {
   private clear(): void {
     const d = devicePixelRatio;
     this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
-  }
-
-  /**
-   * Sample radar intensity from the MapLibre canvas at a screen position.
-   * Draws the MapLibre WebGL canvas to an offscreen 2D canvas, then reads pixels.
-   */
-  private sampleCanvasAt(screenX: number, screenY: number): number {
-    const mapCanvas = this.map.getCanvas();
-    const mapW = mapCanvas.clientWidth;
-    const mapH = mapCanvas.clientHeight;
-
-    // Map CSS screen coords → map canvas pixel coords
-    const px = Math.floor(screenX / mapW * mapCanvas.width);
-    const py = Math.floor(screenY / mapH * mapCanvas.height);
-
-    if (px < 0 || px >= mapCanvas.width || py < 0 || py >= mapCanvas.height) return 0;
-
-    // Snapshot the MapLibre canvas (only once per frame)
-    if (this.sampleDirty) {
-      this.sampleCtx.drawImage(mapCanvas, 0, 0);
-      this.sampleDirty = false;
-    }
-
-    try {
-      const pixel = this.sampleCtx.getImageData(px, py, 1, 1).data;
-      // Radar tiles: colored (green/yellow/red) on dark background
-      const brightness = (pixel[0] * 0.299 + pixel[1] * 0.587 + pixel[2] * 0.114) / 255;
-      // Dark bg ~0.05, radar starts ~0.15+
-      return Math.max(0, (brightness - 0.08) * 2.0);
-    } catch {
-      return 0;
-    }
   }
 
   private frame(): void {
@@ -173,107 +231,76 @@ export class RainEffect {
 
     const zoom = this.map.getZoom();
     const pitch = this.map.getPitch() * Math.PI / 180;
-    const now = performance.now();
-    const doSample = (now - this.lastSampleTime) > SAMPLE_INTERVAL;
-    if (doSample) this.lastSampleTime = now;
 
     // Globe disc center on screen
-    const screenCenterX = cw / 2;
-    const screenCenterY = ch / 2;
-    const zoomScale = Math.pow(2, zoom - 2.0);
-    const globeRadius = Math.min(cw, ch) * 0.38 * zoomScale;
-    const discCenterX = screenCenterX;
-    const discCenterY = screenCenterY + Math.sin(pitch) * globeRadius * 0.5;
+    const scX = cw / 2, scY = ch / 2;
+    const gR = Math.min(cw, ch) * 0.38 * Math.pow(2, zoom - 2.0);
+    const dcX = scX;
+    const dcY = scY + Math.sin(pitch) * gR * 0.5;
 
     const binSegs: Float64Array[] = [];
     const binCounts = new Int32Array(NUM_BINS);
     const maxSegs = Math.ceil(MAX_DRAWN / NUM_BINS) * 4;
-    for (let b = 0; b < NUM_BINS; b++) {
-      binSegs.push(new Float64Array(maxSegs));
-    }
+    for (let b = 0; b < NUM_BINS; b++) binSegs.push(new Float64Array(maxSegs));
 
     let drawn = 0;
-    const sizeScale = Math.max(0.5, Math.min(2, zoom / 5));
+    const sz = Math.max(0.5, Math.min(2, zoom / 5));
 
     for (let i = 0; i < this.drops.length && drawn < MAX_DRAWN; i++) {
-      const drop = this.drops[i];
+      const d = this.drops[i];
 
-      drop.fall += drop.speed;
-      if (drop.fall >= 1) {
-        drop.lon = (Math.random() - 0.5) * 360;
-        drop.lat = (Math.random() - 0.5) * 150;
-        drop.fall = 0;
-        drop.speed = 0.012 + Math.random() * 0.018;
-        drop.length = 0.5 + Math.random() * 0.8;
-        drop.intensity = 0;
-        drop.intensityAge = 999;
+      d.fall += d.speed;
+      if (d.fall >= 1) {
+        d.lon = (Math.random() - 0.5) * 360;
+        d.lat = (Math.random() - 0.5) * 150;
+        d.fall = 0;
+        d.speed = 0.012 + Math.random() * 0.018;
+        d.length = 0.5 + Math.random() * 0.8;
       }
 
-      // Project to screen
-      const pt = this.map.project([drop.lon, drop.lat] as any);
+      const intensity = this.sample(d.lon, d.lat);
+      if (intensity < 0.03) continue;
+
+      const pt = this.map.project([d.lon, d.lat] as any);
       if (!pt) continue;
 
-      // Check inside globe disc
-      const dxFromDisc = pt.x - discCenterX;
-      const dyFromDisc = pt.y - discCenterY;
-      const distFromDisc = Math.sqrt(dxFromDisc * dxFromDisc + dyFromDisc * dyFromDisc);
-      if (distFromDisc > globeRadius) continue;
+      const dx = pt.x - dcX, dy = pt.y - dcY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist > gR) continue;
 
-      // Sample radar from canvas (throttled)
-      if (doSample || drop.intensityAge > 30) {
-        drop.intensity = this.sampleCanvasAt(pt.x, pt.y);
-        drop.intensityAge = 0;
-      } else {
-        drop.intensityAge++;
-      }
-
-      if (drop.intensity < 0.05) continue;
-
-      // Rain direction: toward disc center
       let rdx = 0, rdy = 1;
-      if (distFromDisc > 2) {
-        rdx = -dxFromDisc / distFromDisc;
-        rdy = -dyFromDisc / distFromDisc;
-      }
+      if (dist > 2) { rdx = -dx/dist; rdy = -dy/dist; }
 
-      const streakLen = drop.length * sizeScale * 12;
-      const headOff = drop.fall * streakLen;
-      const tailOff = (drop.fall - 1) * streakLen;
+      const sl = d.length * sz * 12;
+      const ho = d.fall * sl, to = (d.fall-1)*sl;
+      const hx = pt.x+rdx*ho, hy = pt.y+rdy*ho;
+      const tx = pt.x+rdx*to, ty = pt.y+rdy*to;
 
-      const headX = pt.x + rdx * headOff;
-      const headY = pt.y + rdy * headOff;
-      const tailX = pt.x + rdx * tailOff;
-      const tailY = pt.y + rdy * tailOff;
+      if ((hx-tx)**2+(hy-ty)**2 > 40000) continue;
+      if (hy<-20||hy>ch+20||ty<-20||ty>ch+20) continue;
+      if (hx<-20||hx>cw+20||tx<-20||tx>cw+20) continue;
 
-      const sdx = headX - tailX, sdy = headY - tailY;
-      if (sdx * sdx + sdy * sdy > 200 * 200) continue;
-      if (headY < -20 || headY > ch + 20 || tailY < -20 || tailY > ch + 20) continue;
-      if (headX < -20 || headX > cw + 20 || tailX < -20 || tailX > cw + 20) continue;
-
-      const bin = Math.min(NUM_BINS - 1, Math.floor(drop.intensity * NUM_BINS));
+      const bin = Math.min(NUM_BINS-1, Math.floor(intensity*NUM_BINS));
       const segs = binSegs[bin];
       let sc = binCounts[bin];
-      if (sc >= maxSegs - 4) continue;
-
-      segs[sc++] = tailX; segs[sc++] = tailY;
-      segs[sc++] = headX; segs[sc++] = headY;
+      if (sc >= maxSegs-4) continue;
+      segs[sc++]=tx; segs[sc++]=ty; segs[sc++]=hx; segs[sc++]=hy;
       binCounts[bin] = sc;
       drawn++;
     }
 
-    // Flush
     this.ctx.lineCap = 'round';
     for (let b = 0; b < NUM_BINS; b++) {
       const count = binCounts[b];
-      if (count === 0) continue;
+      if (!count) continue;
       const segs = binSegs[b];
-      const [r, g, bl, a] = BIN_COLORS[b];
+      const [r,g,bl,a] = BIN_COLORS[b];
       this.ctx.beginPath();
       for (let j = 0; j < count; j += 4) {
-        this.ctx.moveTo(segs[j], segs[j + 1]);
-        this.ctx.lineTo(segs[j + 2], segs[j + 3]);
+        this.ctx.moveTo(segs[j], segs[j+1]);
+        this.ctx.lineTo(segs[j+2], segs[j+3]);
       }
-      this.ctx.lineWidth = (0.5 + b * 0.35) * sizeScale;
+      this.ctx.lineWidth = (0.5+b*0.35)*sz;
       this.ctx.strokeStyle = `rgba(${r},${g},${bl},${a})`;
       this.ctx.stroke();
     }

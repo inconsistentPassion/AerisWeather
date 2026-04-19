@@ -47,7 +47,6 @@ async function init() {
     bearing: -20,
     maxPitch: 80,
     attributionControl: false,
-    canvasContextAttributes: { preserveDrawingBuffer: true },
     renderWorldCopies: false,
     // Mapbox-style smooth interactions
     dragRotate: true,
