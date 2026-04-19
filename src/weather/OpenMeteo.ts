@@ -14,8 +14,8 @@ const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 // 10° = 36×18 = 648 points → ~26 API calls of 25 points each
 const SAMPLE_STEP = 10;
 
-// Maximum coordinates per API call
-const MAX_PER_CALL = 25;
+// Maximum coordinates per API call (Open-Meteo supports up to ~100)
+const MAX_PER_CALL = 50;
 
 // Cache duration (15 minutes — Open-Meteo updates hourly)
 const CACHE_MS = 15 * 60 * 1000;
@@ -96,7 +96,7 @@ export async function fetchRealWeatherGrid(): Promise<{
       }
       // Small delay between batches to avoid rate limiting
       if (i + MAX_PER_CALL < points.length) {
-        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 20));
       }
     }
 

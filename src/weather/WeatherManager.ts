@@ -43,10 +43,10 @@ export class WeatherManager {
     
     try {
       // Priority 1: Real data from Open-Meteo (free, no key, global)
-      // Timeout after 10s to avoid blocking UI
+      // Timeout after 60s — global grid fetch takes ~20-40s for 28 API batches
       const realGrid = await Promise.race([
         fetchRealWeatherGrid(),
-        new Promise<null>(resolve => setTimeout(() => resolve(null), 10000)),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
       ]);
       if (realGrid) {
         this.grids.set('surface', realGrid);
