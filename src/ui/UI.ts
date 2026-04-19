@@ -60,7 +60,7 @@ export function createUI(container: HTMLElement, weather: WeatherManager, action
           <label>🗺 Layers</label>
           <div class="layer-toggles">
             <button class="layer-btn active" data-layer="wind">💨 Wind</button>
-            <button class="layer-btn active" data-layer="clouds">☁️ Clouds</button>
+            <button class="layer-btn active" data-layer="radar">🛰️ Radar</button>
             <button class="layer-btn" data-layer="temperature">🌡️ Temp</button>
             <button class="layer-btn" data-layer="pressure">📊 Pressure</button>
             <button class="layer-btn" data-layer="humidity">💧 Humidity</button>

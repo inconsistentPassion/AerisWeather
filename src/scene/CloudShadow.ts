@@ -94,7 +94,7 @@ export class CloudShadow {
    */
   update(dt: number, sunDirection: THREE.Vector3): void {
     // Respect cloud layer toggle
-    const cloudsActive = this.weather.isLayerActive('clouds');
+    const cloudsActive = this.weather.isLayerActive('radar');
     this.mesh.visible = cloudsActive;
     if (!cloudsActive) return;
 

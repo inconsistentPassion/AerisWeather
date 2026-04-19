@@ -4,7 +4,7 @@
 
 export type WeatherLevel = 'surface' | '925hPa' | '850hPa' | '700hPa' | '500hPa' | 'FL100' | 'FL200' | 'FL300' | 'FL450';
 
-export type WeatherLayer = 'wind' | 'temperature' | 'pressure' | 'humidity' | 'clouds' | 'radar' | 'satellite';
+export type WeatherLayer = 'wind' | 'temperature' | 'pressure' | 'humidity' | 'radar' | 'satellite';
 
 export interface WeatherGrid {
   width: number;

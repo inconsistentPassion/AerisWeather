@@ -9,7 +9,7 @@ import type { WeatherLevel, WeatherLayer, WeatherGrid, TimeRange } from './types
 import { fetchRealWeatherGrid } from './OpenMeteo';
 
 const DEFAULT_LEVELS: WeatherLevel[] = ['surface', '850hPa', '500hPa', 'FL100', 'FL200', 'FL300'];
-const DEFAULT_LAYERS: WeatherLayer[] = ['wind', 'temperature', 'pressure', 'humidity', 'clouds'];
+const DEFAULT_LAYERS: WeatherLayer[] = ['wind', 'temperature', 'pressure', 'humidity', 'radar'];
 const API_BASE = 'http://localhost:3001';
 
 // Interpolation cache: holds current + next time steps
@@ -23,7 +23,7 @@ export class WeatherManager {
   private timeCache: Map<string, TimeCacheEntry[]> = new Map(); // level -> sorted entries
   private currentTime: number = Date.now();
   private currentLevel: WeatherLevel = 'surface';
-  private activeLayers: Set<WeatherLayer> = new Set(['wind', 'clouds']);
+  private activeLayers: Set<WeatherLayer> = new Set(['wind', 'radar']);
   private isLoading: boolean = false;
   private fetchInterval: ReturnType<typeof setInterval> | null = null;
 

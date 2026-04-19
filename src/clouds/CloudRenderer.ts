@@ -74,7 +74,7 @@ export class CloudRenderer {
   }
 
   update(dt: number, camera: any): void {
-    const active = this.weather.isLayerActive('clouds');
+    const active = this.weather.isLayerActive('radar');
     this.mesh.visible = active;
 
     if (!active) return; // skip shader updates when not visible

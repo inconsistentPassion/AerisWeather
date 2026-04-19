@@ -11,7 +11,7 @@ import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
-import { CloudLayer } from './clouds/CloudLayer';
+import { RadarLayer } from './clouds/RadarLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -76,7 +76,7 @@ async function init() {
 
   // ── Add weather layers immediately ──────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
-  const cloudLayer = new CloudLayer(map, weather);
+  const radarLayer = new RadarLayer(map, weather);
 
   // ── UI immediately ─────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -89,8 +89,8 @@ async function init() {
         case 'wind':
           windParticles.setVisible(active);
           break;
-        case 'clouds':
-          cloudLayer.setVisible(active);
+        case 'radar':
+          radarLayer.setVisible(active);
           break;
       }
     },
