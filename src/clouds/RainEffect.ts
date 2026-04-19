@@ -110,8 +110,8 @@ export class RainEffect {
             const px = cx.getImageData(0, 0, TILE_PX, TILE_PX).data;
 
             // Sample every 4th pixel for perf
-            for (let py = 0; py < TILE_PX; py += 4) {
-              for (let pxx = 0; pxx < TILE_PX; pxx += 4) {
+            for (let py = 0; py < TILE_PX; py += 3) {
+              for (let pxx = 0; pxx < TILE_PX; pxx += 3) {
                 const i = (py * TILE_PX + pxx) * 4;
                 const r = px[i], g = px[i+1], b = px[i+2], a = px[i+3];
                 const lum = (0.299*r + 0.587*g + 0.114*b) / 255;
@@ -154,6 +154,17 @@ export class RainEffect {
     } catch (e) {
       console.warn('[Rain] Load failed:', e);
     }
+  }
+
+  /** Same front-side check as WindParticleLayer */
+  private isFrontSide(lon: number, lat: number): boolean {
+    const c = this.map.getCenter();
+    const cLat = c.lat * Math.PI / 180;
+    const cLon = c.lng * Math.PI / 180;
+    const pLat = lat * Math.PI / 180;
+    const pLon = lon * Math.PI / 180;
+    return Math.sin(cLat) * Math.sin(pLat) +
+           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0;
   }
 
   start(): void {
@@ -220,6 +231,9 @@ export class RainEffect {
       const dx = pt.x - dcX, dy = pt.y - dcY;
       const dist = Math.sqrt(dx*dx + dy*dy);
       if (dist > gR) continue;
+
+      // Cull back side of globe (same as wind particles)
+      if (!this.isFrontSide(d.lon, d.lat)) continue;
 
       let rdx = 0, rdy = 1;
       if (dist > 2) { rdx = -dx/dist; rdy = -dy/dist; }
