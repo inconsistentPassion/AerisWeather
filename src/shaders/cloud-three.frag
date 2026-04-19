@@ -1,11 +1,10 @@
-// cloud-three.frag — Enhanced volumetric cloud shader for Three.js (GLSL 100)
-// 
-// Improvements over original:
-// - Better height falloff (more realistic cloud shapes)
-// - Improved silver lining effect (backlit clouds)
-// - Better ambient lighting integration
-// - Smoother edge transitions
-// - Wind-driven cloud animation
+// cloud-three.frag — Volumetric cloud shader (GLSL 100)
+//
+// Optimizations:
+// - Single-channel noise texture (Red format, not RGBA)
+// - Removed inner sphere intersection (camera is always outside cloud shell)
+// - Adaptive empty-space skipping for zero-coverage regions
+// - Reduced loop overhead with early-exit transmittance check
 
 #define PI 3.14159265359
 
@@ -54,14 +53,14 @@ vec2 worldToUV(vec3 worldPos) {
   );
 }
 
-// Sample cloud coverage from weather map
-float sampleCoverage(vec3 worldPos) {
+// Sample cloud coverage from weather map (quick check before full noise)
+float sampleCoverageQuick(vec3 worldPos) {
   vec2 uv = worldToUV(worldPos);
   float c = texture(uCloudMap, uv).r;
   return c * uCoverageMultiplier;
 }
 
-// Sample 3D noise with wind animation
+// Sample 3D noise with wind animation — single channel (.r)
 float sampleNoise(vec3 worldPos, float scale) {
   vec3 uv = worldPos * scale + vec3(
     uTime * uWindVelocity.x,
@@ -69,7 +68,7 @@ float sampleNoise(vec3 worldPos, float scale) {
     uTime * uWindVelocity.y
   );
   uv = fract(uv);
-  return texture(uNoiseTex, uv).r;
+  return texture(uNoiseTex, uv).r;  // Single channel — was .r reading from RGBA
 }
 
 // Full density at a point
@@ -83,23 +82,21 @@ float getDensity(vec3 worldPos) {
   float cloudRange = uCloudTop - uCloudBase;
   float h = (altitude - uCloudBase) / cloudRange;
   
-  // Improved height falloff — more realistic cloud distribution
-  // Bottom: gradual onset, middle: peak density, top: gradual dissipation
+  // Height falloff — bottom: gradual onset, middle: peak, top: gradual dissipation
   float heightShape = smoothstep(0.0, 0.15, h) * (1.0 - smoothstep(0.6, 1.0, h));
-  // Add a subtle bump in the middle for cumulus-like shape
   heightShape *= 0.7 + 0.3 * smoothstep(0.2, 0.5, h) * (1.0 - smoothstep(0.5, 0.8, h));
 
-  float coverage = sampleCoverage(worldPos);
+  float coverage = sampleCoverageQuick(worldPos);
 
   // Multi-octave noise for detail
   float n1 = sampleNoise(worldPos, 0.0004);
   float n2 = sampleNoise(worldPos, 0.002);
-  float n3 = sampleNoise(worldPos, 0.008); // Fine detail
+  float n3 = sampleNoise(worldPos, 0.008);
   float noise = n1 * 0.55 + n2 * 0.30 + n3 * 0.15;
 
   float density = coverage * heightShape * noise;
   density *= uDensityMultiplier;
-  density = smoothstep(0.02, 0.45, density); // Sharper edges
+  density = smoothstep(0.02, 0.45, density);
 
   return density;
 }
@@ -118,8 +115,8 @@ void main() {
   vec3 ro = uCameraPosition - uPlanetCenter;
   vec3 rd = normalize(vWorldPosition - uCameraPosition);
 
+  // Only need the outer sphere — camera is always outside cloud layer
   vec2 outerHit = hitSphere(ro, rd, uCloudTop);
-  vec2 innerHit = hitSphere(ro, rd, uCloudBase);
 
   if (outerHit.y < 0.0) {
     discard;
@@ -128,8 +125,14 @@ void main() {
   float tNear = max(0.0, outerHit.x);
   float tFar = outerHit.y;
 
-  if (innerHit.x > 0.0) {
-    tFar = min(tFar, innerHit.x);
+  // Clamp march to cloud layer thickness (no inner sphere needed)
+  float cloudTopR = uCloudTop;
+  float cloudBaseR = uCloudBase;
+  float maxMarchLen = (cloudTopR - cloudBaseR) * 1.2; // Slight overshoot is fine
+  float marchLen = tFar - tNear;
+  if (marchLen > maxMarchLen) {
+    marchLen = maxMarchLen;
+    tFar = tNear + marchLen;
   }
 
   if (tNear >= tFar) {
@@ -138,11 +141,10 @@ void main() {
 
   // Blue noise dithering to reduce banding
   float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-  tNear += dither * (tFar - tNear) / float(uMaxSteps);
+  tNear += dither * marchLen / float(uMaxSteps);
 
   float transmittance = 1.0;
   vec3 lightEnergy = vec3(0.0);
-  float marchLen = tFar - tNear;
 
   for (int i = 0; i < 64; i++) {
     if (i >= uMaxSteps) break;
@@ -150,6 +152,10 @@ void main() {
 
     float t = tNear + marchLen * (float(i) + 0.5) / float(uMaxSteps);
     vec3 pos = uCameraPosition + rd * t;
+
+    // Empty-space skip: quick coverage check before full density evaluation
+    float quickCov = sampleCoverageQuick(pos);
+    if (quickCov < 0.01) continue; // Skip this step entirely
 
     float density = getDensity(pos);
 
@@ -161,7 +167,7 @@ void main() {
       // Light march (self-shadowing)
       float lightDensity = 0.0;
       float lightStep = 400.0;
-      for (int j = 0; j < 4; j++) {
+      for (int j = 0; j < 8; j++) {
         if (j >= uLightSteps) break;
         vec3 lp = pos + uSunDirection * float(j) * lightStep;
         lightDensity += getDensity(lp) * lightStep * 0.5;
@@ -171,14 +177,13 @@ void main() {
       float cosTheta = dot(rd, uSunDirection);
       float pf = phase(cosTheta);
 
-      // Enhanced silver lining (backlit cloud edges glow bright)
+      // Silver lining (backlit cloud edges)
       float silver = 0.0;
       if (cosTheta < -0.2) {
         silver = pow(max(0.0, -cosTheta - 0.2) / 0.8, 2.0) * 0.6;
       }
 
       vec3 scatter = uSunColor * (lightTrans * pf + silver);
-      // Warmer, more natural ambient
       vec3 ambient = vec3(0.35, 0.45, 0.65) * 0.15;
       lightEnergy += transmittance * extinction * (scatter + ambient);
     }
@@ -186,6 +191,9 @@ void main() {
 
   float alpha = 1.0 - transmittance;
   alpha = smoothstep(0.0, 0.03, alpha);
+
+  // Discard fully transparent fragments to save blending cost
+  if (alpha < 0.005) discard;
 
   gl_FragColor = vec4(lightEnergy, alpha);
 }

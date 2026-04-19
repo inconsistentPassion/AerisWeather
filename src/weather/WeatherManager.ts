@@ -30,6 +30,11 @@ export class WeatherManager {
   // Event callbacks
   private listeners: Map<string, Set<Function>> = new Map();
 
+  // Interpolation cache — avoids 6MB/frame allocations
+  private _interpCacheKey = '';
+  private _interpCacheGrid: WeatherGrid | null = null;
+  private _interpBuffers: Map<string, Float32Array> = new Map(); // field name -> pre-allocated buffer
+
   /**
    * Load initial weather data for the default view.
    */
@@ -151,16 +156,32 @@ export class WeatherManager {
   }
 
   /**
-   * Interpolate between two time steps.
+   * Get or create a pre-allocated interpolation buffer for a field.
+   */
+  private getInterpBuffer(fieldName: string, length: number): Float32Array {
+    let buf = this._interpBuffers.get(fieldName);
+    if (!buf || buf.length !== length) {
+      buf = new Float32Array(length);
+      this._interpBuffers.set(fieldName, buf);
+    }
+    return buf;
+  }
+
+  /**
+   * Interpolate between two time steps — writes into pre-allocated buffers.
    */
   private interpolateGrids(a: WeatherGrid, b: WeatherGrid, t: number): WeatherGrid {
-    const lerp = (x: number, y: number, t: number) => x + (y - x) * t;
-    
-    const interpField = (fa: Float32Array | undefined, fb: Float32Array | undefined): Float32Array | undefined => {
-      if (!fa || !fb) return fa || fb;
-      const result = new Float32Array(fa.length);
+    const interpField = (
+      fieldName: string,
+      fa: Float32Array | undefined,
+      fb: Float32Array | undefined,
+    ): Float32Array | undefined => {
+      if (!fa && !fb) return undefined;
+      if (!fa) return fb;
+      if (!fb) return fa;
+      const result = this.getInterpBuffer(fieldName, fa.length);
       for (let i = 0; i < fa.length; i++) {
-        result[i] = lerp(fa[i], fb[i], t);
+        result[i] = fa[i] + (fb[i] - fa[i]) * t;
       }
       return result;
     };
@@ -169,12 +190,12 @@ export class WeatherManager {
       width: a.width,
       height: a.height,
       fields: {
-        cloudFraction: interpField(a.fields.cloudFraction, b.fields.cloudFraction),
-        humidity: interpField(a.fields.humidity, b.fields.humidity),
-        temperature: interpField(a.fields.temperature, b.fields.temperature),
-        u: interpField(a.fields.u, b.fields.u),
-        v: interpField(a.fields.v, b.fields.v),
-        w: interpField(a.fields.w, b.fields.w),
+        cloudFraction: interpField('cloudFraction', a.fields.cloudFraction, b.fields.cloudFraction),
+        humidity: interpField('humidity', a.fields.humidity, b.fields.humidity),
+        temperature: interpField('temperature', a.fields.temperature, b.fields.temperature),
+        u: interpField('u', a.fields.u, b.fields.u),
+        v: interpField('v', a.fields.v, b.fields.v),
+        w: interpField('w', a.fields.w, b.fields.w),
       },
     };
   }
@@ -211,11 +232,19 @@ export class WeatherManager {
 
   /**
    * Update per frame — handles interpolation, pre-fetching, etc.
+   * Skips work entirely if time/level haven't changed since last interpolation.
    */
   update(dt: number): void {
-    // Interpolate current grid if we have time cache
+    const cacheKey = `${this.currentLevel}:${this.currentTime}`;
+    if (cacheKey === this._interpCacheKey && this._interpCacheGrid) {
+      // Already interpolated this exact time/level — skip entirely
+      return;
+    }
+
     const interpolated = this.getInterpolatedGrid(this.currentLevel, this.currentTime);
     if (interpolated) {
+      this._interpCacheKey = cacheKey;
+      this._interpCacheGrid = interpolated;
       this.grids.set(this.currentLevel, interpolated);
     }
   }
@@ -269,6 +298,7 @@ export class WeatherManager {
    */
   async setTime(timestamp: number): Promise<void> {
     this.currentTime = timestamp;
+    this._interpCacheKey = ''; // invalidate cache
     this.emit('timeChange', { time: timestamp });
 
     // Check if we need to fetch new data
@@ -303,6 +333,7 @@ export class WeatherManager {
    */
   async setLevel(level: WeatherLevel): Promise<void> {
     this.currentLevel = level;
+    this._interpCacheKey = ''; // invalidate cache
     this.emit('levelChange', { level });
 
     // Fetch if we don't have this level

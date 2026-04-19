@@ -53,6 +53,10 @@ export class WindParticleLayer {
   private binSegs: Float64Array[] = [];
   private binSegCount = new Int32Array(NUM_BINS);
 
+  // Pre-allocated projection buffers (avoid per-frame heap alloc)
+  private projX = new Float64Array(TRAIL_LEN);
+  private projY = new Float64Array(TRAIL_LEN);
+
   constructor(map: maplibregl.Map, weather: WeatherManager) {
     this.map = map;
     this.weather = weather;
@@ -129,16 +133,27 @@ export class WindParticleLayer {
     this.canvas.remove();
   }
 
-  /* ── front-side check ───────────────────────────────────────── */
+  /* ── front-side check (cached trig) ────────────────────────── */
 
-  private isFrontSide(lon: number, lat: number): boolean {
+  // Cached center trig values (updated once per frame)
+  private _cSinLat = 0;
+  private _cCosLat = 1;
+  private _cLonRad = 0;
+  private _frontSideCacheFrame = -1;
+
+  private updateFrontSideCache(): void {
     const c = this.map.getCenter();
     const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
+    this._cSinLat = Math.sin(cLat);
+    this._cCosLat = Math.cos(cLat);
+    this._cLonRad = c.lng * Math.PI / 180;
+  }
+
+  private isFrontSide(lon: number, lat: number): boolean {
     const pLat = lat * Math.PI / 180;
     const pLon = lon * Math.PI / 180;
-    return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0.05; // Slight bias toward front
+    return this._cSinLat * Math.sin(pLat) +
+           this._cCosLat * Math.cos(pLat) * Math.cos(pLon - this._cLonRad) > 0.05;
   }
 
   /* ── bilinear wind sample ───────────────────────────────────── */
@@ -176,6 +191,9 @@ export class WindParticleLayer {
     const { u, v } = wf;
     const gw = 360, gh = 180;
 
+    /* cache front-side trig once per frame */
+    this.updateFrontSideCache();
+
     /* fade — XWeather-style smooth persistence */
     const dpr = devicePixelRatio;
     const cw = this.canvas.width / dpr;
@@ -200,6 +218,30 @@ export class WindParticleLayer {
     for (let i = 0; i < TOTAL_PARTICLES; i++) {
       this.age[i] += 1;
       if (this.age[i] >= MAX_AGE) { this.spawn(i); spawned++; continue; }
+
+      /* early viewport cull — skip wind sample for off-screen particles */
+      const pLon = this.lon[i];
+      const pLat = this.lat[i];
+      let roughlyInView: boolean;
+      if (crossesDateLine) {
+        roughlyInView = (pLon >= vpW - 10) || (pLon <= vpE + 10);
+      } else {
+        roughlyInView = pLon >= vpW - 10 && pLon <= vpE + 10;
+      }
+      if (!roughlyInView || pLat < vpS - 10 || pLat > vpN + 10) {
+        /* still advect off-screen so they drift into view eventually */
+        const wind = this.sampleWind(u, v, pLon, pLat, gw, gh);
+        if (wind.speed >= 0.3) {
+          const cosLat = Math.max(0.3, Math.cos(pLat * Math.PI / 180));
+          const sf = Math.sqrt(wind.speed);
+          this.lon[i] += (wind.u / wind.speed) * sf * BASE_SPEED / cosLat;
+          this.lat[i] += (wind.v / wind.speed) * sf * BASE_SPEED;
+          if (this.lon[i] > 180) this.lon[i] -= 360;
+          if (this.lon[i] < -180) this.lon[i] += 360;
+          this.lat[i] = Math.max(-85, Math.min(85, this.lat[i]));
+        }
+        continue;
+      }
 
       const wind = this.sampleWind(u, v, this.lon[i], this.lat[i], gw, gh);
       this.spd[i] = wind.speed;
@@ -234,14 +276,15 @@ export class WindParticleLayer {
       if (!inView || this.lat[i] < vpS - 2 || this.lat[i] > vpN + 2) continue;
       if (!this.isFrontSide(this.lon[i], this.lat[i])) continue;
 
-      /* project trail */
-      const px = new Float64Array(TRAIL_LEN);
-      const py = new Float64Array(TRAIL_LEN);
+      /* project trail — reuse pre-allocated buffers */
+      const transform = (this.map as any).transform;
       for (let t = 0; t < TRAIL_LEN; t++) {
         const slot = (h + t) % TRAIL_LEN;
-        const pt = this.map.project([this.trailLon[tb + slot], this.trailLat[tb + slot]] as any);
-        px[t] = pt.x; py[t] = pt.y;
+        const pt = transform.project(this.trailLon[tb + slot], this.trailLat[tb + slot]);
+        this.projX[t] = pt.x; this.projY[t] = pt.y;
       }
+      const px = this.projX;
+      const py = this.projY;
 
       /* bin by speed (XWeather uses exact m/s thresholds) */
       const bin = Math.min(NUM_BINS - 1, Math.floor((wind.speed / 25) * NUM_BINS));

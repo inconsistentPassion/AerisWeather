@@ -3,20 +3,22 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Custom layers   → wind particles, cloud overlay, atmosphere glow
+ * Three.js        → volumetric clouds (shared GL context via custom layer)
+ * Custom layers   → wind particles, radar, rain, atmosphere glow
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
+import * as THREE from 'three';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
 import { RainEffect } from './clouds/RainEffect';
+import { CloudRenderer } from './clouds/CloudRenderer';
 import { createAtmosphereLayer } from './scene/AtmosphereLayer';
 
 // ── Mapbox-inspired dark style with enhanced terrain ────────────────
-// Using a style closer to Mapbox Dark v2: deeper blacks, subtle terrain shading
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
 // ── Mapbox-style atmosphere colors ──────────────────────────────────
@@ -27,6 +29,87 @@ const ATMOSPHERE_COLORS = {
   sunset: [1.0, 0.45, 0.2],       // Warm orange at terminator
   sunGlow: [1.0, 0.95, 0.85],     // Bright white-yellow sun
 };
+
+/**
+ * Create a MapLibre custom layer that renders Three.js volumetric clouds
+ * using the shared WebGL context for perfect overlay alignment.
+ */
+function createCloudCustomLayer(weather: WeatherManager): maplibregl.CustomLayerInterface {
+  let renderer: THREE.WebGLRenderer | null = null;
+  let scene: THREE.Scene | null = null;
+  let camera: THREE.PerspectiveCamera | null = null;
+  let cloudParent: THREE.Object3D | null = null;
+  let cloudRenderer: CloudRenderer | null = null;
+
+  return {
+    id: 'three-clouds',
+    type: 'custom',
+    renderingMode: '3d',
+
+    onAdd(mapInstance: maplibregl.Map, gl: WebGLRenderingContext) {
+      renderer = new THREE.WebGLRenderer({
+        canvas: mapInstance.getCanvas(),
+        context: gl,
+        antialias: true,
+        alpha: true,
+      });
+      renderer.autoClear = false; // Don't clear MapLibre's framebuffer
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera();
+
+      cloudParent = new THREE.Object3D();
+      scene.add(cloudParent);
+
+      // Create volumetric cloud renderer
+      cloudRenderer = new CloudRenderer(cloudParent, weather);
+
+      // Lighting for cloud shading
+      const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
+      sun.position.set(1, 0.5, -0.3);
+      scene.add(sun);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+      console.log('[Clouds] Volumetric cloud renderer initialized');
+    },
+
+    render(_gl: WebGLRenderingContext, args: any) {
+      if (!renderer || !scene || !camera || !cloudParent) return;
+
+      // Sync camera with MapLibre's native GL matrices
+      const mainMatrix: number[] = args?.defaultProjectionData?.mainMatrix;
+      if (mainMatrix && mainMatrix.length === 16) {
+        camera.projectionMatrix.fromArray(mainMatrix);
+        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+        camera.position.set(0, 0, 0);
+        camera.quaternion.identity();
+        camera.scale.set(1, 1, 1);
+        camera.updateMatrixWorld(true);
+      }
+
+      // Slow cloud rotation (wind drift simulation)
+      cloudParent.rotation.y = performance.now() * 0.001 * 0.008;
+
+      if (cloudRenderer) {
+        cloudRenderer.update(1 / 60, { threeCamera: camera });
+      }
+
+      // Render Three.js on top of MapLibre
+      renderer.state.reset();
+      renderer.render(scene, camera);
+    },
+
+    onRemove() {
+      if (renderer) renderer.dispose();
+      renderer = null;
+      scene = null;
+      camera = null;
+      cloudParent = null;
+      cloudRenderer = null;
+    },
+  };
+}
 
 async function init() {
   const container = document.getElementById('app')!;
@@ -48,12 +131,13 @@ async function init() {
     maxPitch: 80,
     attributionControl: false,
     renderWorldCopies: false,
-    // Mapbox-style smooth interactions
+    cancelPendingTileRequestsWhileZooming: true,
+    maxTileCacheZoomLevels: 4,
     dragRotate: true,
     pitchWithRotate: true,
     touchZoomRotate: true,
     transformRequest: (url, resourceType) => {
-      // Cap RainViewer tile requests at z10
+      // Cap RainViewer tile requests at z8
       if (resourceType === 'Tile' && url.includes('rainviewer.com')) {
         const match = url.match(/\/(\d+)\/(\d+)\/(\d+)\.png/);
         if (match) {
@@ -81,25 +165,25 @@ async function init() {
       console.warn('setProjection failed:', e);
     }
 
-    // Add fog for depth effect (Mapbox-style distant fog)
+    // Add fog for depth effect
     try {
       (map as any).setFog({
-        color: 'rgb(10, 15, 30)',        // Dark blue fog at distance
-        'high-color': 'rgb(20, 30, 60)',  // Slightly brighter above horizon
-        'horizon-blend': 0.08,            // Subtle blend at horizon
-        'space-color': 'rgb(2, 4, 10)',   // Deep space color
-        'star-intensity': 0.35,           // Subtle starfield
+        color: 'rgb(10, 15, 30)',
+        'high-color': 'rgb(20, 30, 60)',
+        'horizon-blend': 0.08,
+        'space-color': 'rgb(2, 4, 10)',
+        'star-intensity': 0.35,
       });
-      console.log('[Fog] Mapbox-style atmospheric fog enabled');
+      console.log('[Fog] Atmospheric fog enabled');
     } catch (e) {
-      console.warn('[Fog] Not supported in this MapLibre version:', e);
+      console.warn('[Fog] Not supported:', e);
     }
   });
 
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Atmosphere sky (Mapbox-style glow) ─────────────────────────────
+  // ── Atmosphere sky ─────────────────────────────────────────────────
   try {
     (map as any).setSky({
       'sky-type': 'atmosphere',
@@ -117,12 +201,12 @@ async function init() {
   try {
     const atmosphereLayer = createAtmosphereLayer();
     map.addLayer(atmosphereLayer);
-    console.log('[Atmosphere] Custom Rayleigh scattering layer added');
+    console.log('[Atmosphere] Rayleigh scattering layer added');
   } catch (e) {
-    console.warn('[Atmosphere] Custom layer failed:', e);
+    console.warn('[Atmosphere] Layer failed:', e);
   }
 
-  // ── 3D Terrain elevation (Mapbox-style hillshade) ──────────────────
+  // ── 3D Terrain + hillshade (single shared DEM source) ──────────────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -130,20 +214,13 @@ async function init() {
       tileSize: 256,
       encoding: 'terrarium',
     });
-    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 }); // Higher exaggeration for drama
+    map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 });
     console.log('[Terrain] 3D elevation enabled');
 
-    // Add hillshade layer for terrain relief (Mapbox-style)
-    map.addSource('hillshade', {
-      type: 'raster-dem',
-      tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      encoding: 'terrarium',
-    });
     map.addLayer({
       id: 'hillshade-layer',
       type: 'hillshade',
-      source: 'hillshade',
+      source: 'terrain-dem',
       paint: {
         'hillshade-illumination-direction': 315,
         'hillshade-exaggeration': 0.6,
@@ -154,10 +231,20 @@ async function init() {
     });
     console.log('[Hillshade] Terrain relief shading enabled');
   } catch (e) {
-    console.warn('[Terrain] Failed to load:', e);
+    console.warn('[Terrain] Failed:', e);
   }
 
-  // ── Suppress tile errors (zoom not supported, 404s, etc.) ──────────
+  // ── Volumetric clouds (Three.js custom layer) ──────────────────────
+  // This renders ray-marched volumetric clouds using MapLibre's shared GL context
+  try {
+    const cloudLayer = createCloudCustomLayer(weather);
+    map.addLayer(cloudLayer);
+    console.log('[Clouds] Volumetric cloud layer added');
+  } catch (e) {
+    console.warn('[Clouds] Failed to add:', e);
+  }
+
+  // ── Suppress non-critical tile errors ──────────────────────────────
   map.on('error', (e) => {
     const msg = e.error?.message || e.error?.toString() || '';
     if (msg.includes('rainviewer') || msg.includes('zoom level') ||
@@ -167,12 +254,11 @@ async function init() {
     console.error('MapLibre error:', e);
   });
 
-  // ── Add weather layers ─────────────────────────────────────────────
+  // ── Weather layers ─────────────────────────────────────────────────
   const windParticles = new WindParticleLayer(map, weather);
   const radarLayer = new RadarLayer(map, weather);
   const rainEffect = new RainEffect(map);
 
-  // Start radar + rain on init
   radarLayer.setVisible(true);
   rainEffect.setVisible(true);
 
@@ -239,7 +325,6 @@ async function init() {
         break;
     }
   });
-
 }
 
 init().catch(console.error);
