@@ -12,6 +12,8 @@ import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
+import { CloudPointLayer } from './clouds/CloudPointLayer';
+import { RainEffect } from './clouds/RainEffect';
 import { CITIES, searchCities, City } from './weather/CitySearch';
 
 // Dark raster style — no CORS issues (unlike Carto vector tiles)
@@ -87,6 +89,14 @@ async function init() {
   map.addControl(deckLayers.getControl() as any);
   deckLayers.onMapReady(map);
 
+  // ── MapLibre custom WebGL layers (data-driven clouds + rain) ──────
+  const cloudLayer = new CloudPointLayer(weather);
+  map.addLayer(cloudLayer.getLayer());
+
+  const rainEffect = new RainEffect(map);
+  map.addLayer(rainEffect.getLayer());
+  rainEffect.setVisible(true);
+
   let currentCity: City | null = null;
 
   // ── UI ─────────────────────────────────────────────────────────────
@@ -96,6 +106,8 @@ async function init() {
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
       deckLayers.setVisible(layer as any, active);
+      if (layer === 'clouds') cloudLayer.setVisible(active);
+      if (layer === 'radar') rainEffect.setVisible(active);
     },
     onCameraMode: (mode) => {
       if (mode === 'orbit') map.flyTo({ pitch: 0, bearing: 0, duration: 1000 });
