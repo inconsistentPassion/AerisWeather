@@ -14,7 +14,7 @@ import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
 import { CloudPointLayer } from './clouds/CloudPointLayer';
 import { RainEffect } from './clouds/RainEffect';
-import { SatelliteLayer } from './clouds/SatelliteLayer';
+import { SatelliteCoverage } from './clouds/SatelliteCoverage';
 import { CITIES, searchCities, City } from './weather/CitySearch';
 
 // Dark raster style — no CORS issues (unlike Carto vector tiles)
@@ -98,8 +98,18 @@ async function init() {
   map.addLayer(rainEffect.getLayer());
   rainEffect.setVisible(true);
 
-  // ── Satellite IR cloud imagery (RainViewer) ───────────────────────
-  const satelliteLayer = new SatelliteLayer(map);
+  // ── Satellite cloud coverage (NASA GIBS) ──────────────────────────
+  const satCoverage = new SatelliteCoverage();
+
+  // Feed satellite coverage into weather manager + cloud layer
+  satCoverage.on('coverageUpdated', (map: any) => {
+    console.log(`[Main] Satellite coverage updated: ${map.source}`);
+    weather.setCoverageMap(map);
+    cloudLayer.setCoverageMap(map);
+  });
+
+  // Start fetching (immediate + every 30 min)
+  satCoverage.startAutoRefresh();
 
   let currentCity: City | null = null;
 
@@ -112,7 +122,6 @@ async function init() {
       deckLayers.setVisible(layer as any, active);
       if (layer === 'clouds') {
         cloudLayer.setVisible(active);
-        satelliteLayer.setVisible(active);
       }
       if (layer === 'radar') rainEffect.setVisible(active);
     },

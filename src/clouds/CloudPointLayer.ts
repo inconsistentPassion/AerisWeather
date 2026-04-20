@@ -421,6 +421,9 @@ export class CloudPointLayer {
   private noiseW = 256;
   private noiseH = 128;
 
+  // Satellite coverage map (from GIBS)
+  private satelliteCoverage: { data: Float32Array; width: number; height: number } | null = null;
+
   constructor(weather: WeatherManager) {
     this.weather = weather;
     this.weather.on('dataLoaded', () => { this.dirty = true; this.map?.triggerRepaint(); });
@@ -612,8 +615,13 @@ export class CloudPointLayer {
     let w = 360, h = 180;
     let dataSource = 'none';
 
-    // Get cloud fraction data
-    if (layers) {
+    // Get cloud fraction data — satellite coverage first (highest priority)
+    if (this.satelliteCoverage) {
+      cloudData = this.satelliteCoverage.data;
+      w = this.satelliteCoverage.width;
+      h = this.satelliteCoverage.height;
+      dataSource = 'GIBS Satellite';
+    } else if (layers) {
       w = layers.width; h = layers.height;
       cloudData = new Float32Array(w * h);
       for (let i = 0; i < w * h; i++) {
@@ -759,6 +767,12 @@ export class CloudPointLayer {
       `[Clouds] ${total} pts from ${dataSource}: ` +
       BANDS.map(b => `${b.id}=${this.vbos.get(b.id)!.count}`).join(' ')
     );
+  }
+
+  setCoverageMap(map: { data: Float32Array; width: number; height: number; source: string }): void {
+    this.satelliteCoverage = { data: map.data, width: map.width, height: map.height };
+    this.dirty = true;
+    this.map?.triggerRepaint();
   }
 
   setVisible(v: boolean): void {

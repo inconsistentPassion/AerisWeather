@@ -13,6 +13,7 @@ const API_BASE = 'http://localhost:3001';
 export class WeatherManager {
   private grids: Map<string, WeatherGrid> = new Map();
   private cloudLayers: CloudLayers | null = null;
+  private coverageMap: { data: Float32Array; width: number; height: number; source: string } | null = null;
   private currentTime: number = Date.now();
   private currentLevel: WeatherLevel = 'surface';
   private activeLayers: Set<WeatherLayer> = new Set(['wind', 'radar', 'clouds']);
@@ -218,6 +219,20 @@ export class WeatherManager {
     const grid = this.grids.get(level);
     if (!grid || !grid.fields.u || !grid.fields.v) return null;
     return { u: grid.fields.u, v: grid.fields.v };
+  }
+
+  setCoverageMap(map: { data: Float32Array; width: number; height: number; source: string }): void {
+    this.coverageMap = map;
+    // Update the surface grid's cloudFraction with satellite data
+    const grid = this.grids.get('surface');
+    if (grid && map.width === grid.width && map.height === grid.height) {
+      grid.fields.cloudFraction = map.data;
+      this.emit('dataLoaded', { level: 'surface', source: map.source });
+    }
+  }
+
+  getCoverageMap(): { data: Float32Array; width: number; height: number; source: string } | null {
+    return this.coverageMap;
   }
 
   async setTime(timestamp: number): Promise<void> {
