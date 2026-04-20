@@ -49,7 +49,7 @@ const WMS_HEIGHT = 512;
 /** Noise detail parameters */
 const NOISE_OCTAVES = 4;
 const NOISE_FREQUENCY = 6.0;
-const NOISE_MIN_VALUE = 0.35; // EVE: "minimum value so it doesn't eat your cloud map"
+const NOISE_MIN_VALUE = 0.15; // EVE: noise adds texture, not base density
 
 // ── GIBS Configuration ─────────────────────────────────────────────────
 
@@ -470,12 +470,12 @@ function applyPriors(coverage: Float32Array): Float32Array {
     for (let i = 0; i < GRID_W; i++) {
       const idx = j * GRID_W + i;
       // ITCZ
-      const itcz = Math.exp(-absLat * absLat * 0.01) * 0.12;
+      const itcz = Math.exp(-absLat * absLat * 0.01) * 0.06;
       // Storm tracks
-      const storm30 = Math.exp(-Math.pow(absLat - 30, 2) * 0.02) * 0.06;
-      const storm60 = Math.exp(-Math.pow(absLat - 60, 2) * 0.02) * 0.04;
+      const storm30 = Math.exp(-Math.pow(absLat - 30, 2) * 0.02) * 0.03;
+      const storm60 = Math.exp(-Math.pow(absLat - 60, 2) * 0.02) * 0.02;
       // Polar penalty
-      const polar = absLat > 70 ? -0.08 * ((absLat - 70) / 20) : 0;
+      const polar = absLat > 70 ? -0.05 * ((absLat - 70) / 20) : 0;
 
       result[idx] = Math.max(0, Math.min(1, result[idx] + itcz + storm30 + storm60 + polar));
     }

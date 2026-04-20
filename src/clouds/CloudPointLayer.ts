@@ -59,7 +59,7 @@ const BANDS: BandConfig[] = ALL_CLOUD_TYPES.map(ct => ({
   color: ct.color,
   sizeRange: ct.sizeRange,
   opacityRange: ct.opacityRange,
-  maxPoints: Math.round(ct.density * 15000),
+  maxPoints: Math.round(ct.density * 5000),
   density: ct.density,
   dataWeight: ct.dataWeight,
   noiseScale: ct.noiseScale,
@@ -654,7 +654,7 @@ export class CloudPointLayer {
         for (let i = 0; i < w && n < band.maxPoints; i++) {
           let cf = cloudData[j * w + i];
           if (cf > 1) cf /= 100;
-          if (cf < 0.03) continue;
+          if (cf < 0.10) continue; // skip cells with < 10% cloud cover
 
           // Apply data weight (like EVE's cloudFraction × dataWeight)
           let density = cf * band.dataWeight;
