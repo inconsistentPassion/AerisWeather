@@ -14,7 +14,7 @@ import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
 import { CloudPointLayer } from './clouds/CloudPointLayer';
 import { RainEffect } from './clouds/RainEffect';
-import { SatelliteCoverage } from './clouds/SatelliteCoverage';
+import { LiveCloudMap } from './clouds/LiveCloudMap';
 import { CITIES, searchCities, City } from './weather/CitySearch';
 
 // Dark raster style — no CORS issues (unlike Carto vector tiles)
@@ -98,18 +98,17 @@ async function init() {
   map.addLayer(rainEffect.getLayer());
   rainEffect.setVisible(true);
 
-  // ── Satellite cloud coverage (NASA GIBS) ──────────────────────────
-  const satCoverage = new SatelliteCoverage();
+  // ── Live cloud coverage (EUMETSAT via live-cloud-maps) ───────────
+  const liveClouds = new LiveCloudMap();
 
-  // Feed satellite coverage into weather manager + cloud layer
-  satCoverage.on('coverageUpdated', (map: any) => {
-    console.log(`[Main] Satellite coverage updated: ${map.source}`);
-    weather.setCoverageMap(map);
+  // Feed coverage into cloud layer
+  liveClouds.on('coverageUpdated', (map: any) => {
+    console.log(`[Main] Cloud coverage updated: ${map.source}`);
     cloudLayer.setCoverageMap(map);
   });
 
-  // Start fetching (immediate + every 30 min)
-  satCoverage.startAutoRefresh();
+  // Start fetching (immediate + every 3 hours)
+  liveClouds.startAutoRefresh();
 
   let currentCity: City | null = null;
 
