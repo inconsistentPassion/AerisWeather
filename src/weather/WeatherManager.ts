@@ -223,12 +223,10 @@ export class WeatherManager {
 
   setCoverageMap(map: { data: Float32Array; width: number; height: number; source: string }): void {
     this.coverageMap = map;
-    // Update the surface grid's cloudFraction with satellite data
-    const grid = this.grids.get('surface');
-    if (grid && map.width === grid.width && map.height === grid.height) {
-      grid.fields.cloudFraction = map.data;
-      this.emit('dataLoaded', { level: 'surface', source: map.source });
-    }
+    // NOTE: Do NOT replace grid.fields.cloudFraction — satellite data is for
+    // global visualization only. City focus view uses Open-Meteo model data
+    // which is more accurate for point forecasts.
+    this.emit('coverageUpdated', map);
   }
 
   getCoverageMap(): { data: Float32Array; width: number; height: number; source: string } | null {
