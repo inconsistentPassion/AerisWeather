@@ -57,23 +57,22 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Cumulus',
     minAlt: 500, maxAlt: 2500, typicalAlt: 1200,
     color: [0.97, 0.97, 0.99],
-    opacityRange: [0.45, 0.85],
-    sizeRange: [10, 28],
-    density: 7,
+    opacityRange: [0.15, 0.45],
+    sizeRange: [6, 18],
+    density: 3,
     noiseScale: 1.0,
     edgeHardness: 0.7,
     erosionDepth: 0.5,
-    worleySpherical: 1.0,  // billowy, puffy
-    // Bell curve: dense in middle, thin at base and top
+    worleySpherical: 1.0,
     coverageCurve: [
       [0.0, 0.0],
-      [0.15, 0.4],
-      [0.4, 0.9],
-      [0.6, 1.0],
-      [0.8, 0.6],
+      [0.15, 0.3],
+      [0.4, 0.7],
+      [0.6, 0.8],
+      [0.8, 0.4],
       [1.0, 0.0],
     ],
-    dataWeight: 0.45,
+    dataWeight: 0.40,
   },
 
   stratus: {
@@ -81,22 +80,21 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Stratus',
     minAlt: 1500, maxAlt: 5000, typicalAlt: 3000,
     color: [0.85, 0.87, 0.93],
-    opacityRange: [0.25, 0.55],
-    sizeRange: [14, 36],
-    density: 4,
+    opacityRange: [0.10, 0.30],
+    sizeRange: [8, 22],
+    density: 2,
     noiseScale: 0.7,
-    edgeHardness: 0.4,  // diffuse, soft edges
+    edgeHardness: 0.4,
     erosionDepth: 0.3,
-    worleySpherical: 0.3,  // flatter, more layered
-    // Flat top, gradual base
+    worleySpherical: 0.3,
     coverageCurve: [
       [0.0, 0.0],
-      [0.1, 0.6],
-      [0.3, 0.9],
-      [0.9, 0.8],
-      [1.0, 0.2],
+      [0.1, 0.4],
+      [0.3, 0.7],
+      [0.9, 0.5],
+      [1.0, 0.1],
     ],
-    dataWeight: 0.25,
+    dataWeight: 0.20,
   },
 
   cirrus: {
@@ -104,22 +102,21 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Cirrus',
     minAlt: 6000, maxAlt: 12000, typicalAlt: 8500,
     color: [0.80, 0.84, 0.95],
-    opacityRange: [0.10, 0.35],
-    sizeRange: [16, 40],
-    density: 2,
+    opacityRange: [0.05, 0.20],
+    sizeRange: [10, 28],
+    density: 1,
     noiseScale: 1.5,
-    edgeHardness: 0.3,  // very wispy
-    erosionDepth: 0.8,  // deep erosion = feathery
-    worleySpherical: 0.0,  // not billowy, streaky
-    // Thin sheet, concentrated in middle
+    edgeHardness: 0.3,
+    erosionDepth: 0.8,
+    worleySpherical: 0.0,
     coverageCurve: [
       [0.0, 0.0],
-      [0.2, 0.2],
-      [0.5, 0.6],
-      [0.8, 0.4],
+      [0.2, 0.15],
+      [0.5, 0.4],
+      [0.8, 0.25],
       [1.0, 0.0],
     ],
-    dataWeight: 0.08,
+    dataWeight: 0.06,
   },
 
   cumulonimbus: {
@@ -127,25 +124,24 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Cumulonimbus',
     minAlt: 500, maxAlt: 12000, typicalAlt: 4000,
     color: [0.65, 0.68, 0.78],
-    opacityRange: [0.50, 0.95],
-    sizeRange: [16, 42],
-    density: 6,
+    opacityRange: [0.20, 0.60],
+    sizeRange: [10, 30],
+    density: 3,
     noiseScale: 0.8,
-    edgeHardness: 0.85,  // sharp, dramatic edges
+    edgeHardness: 0.85,
     erosionDepth: 0.65,
     worleySpherical: 0.8,
-    // Tall tower: thin base, massive middle, anvil top
     coverageCurve: [
       [0.0, 0.0],
-      [0.05, 0.3],
-      [0.15, 0.6],
-      [0.3, 0.8],
-      [0.5, 0.9],
-      [0.7, 1.0],   // anvil base
-      [0.85, 0.7],  // anvil spread
-      [1.0, 0.2],   // wispy top
+      [0.05, 0.2],
+      [0.15, 0.4],
+      [0.3, 0.6],
+      [0.5, 0.7],
+      [0.7, 0.8],
+      [0.85, 0.5],
+      [1.0, 0.1],
     ],
-    dataWeight: 0.05,
+    dataWeight: 0.04,
   },
 
   fog: {
@@ -153,21 +149,20 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Fog / Stratus Low',
     minAlt: 0, maxAlt: 800, typicalAlt: 300,
     color: [0.90, 0.91, 0.94],
-    opacityRange: [0.15, 0.40],
-    sizeRange: [20, 50],
-    density: 3,
+    opacityRange: [0.05, 0.20],
+    sizeRange: [12, 30],
+    density: 1,
     noiseScale: 0.5,
-    edgeHardness: 0.15,  // extremely diffuse
+    edgeHardness: 0.15,
     erosionDepth: 0.2,
     worleySpherical: 0.1,
-    // Ground-hugging, fading upward
     coverageCurve: [
-      [0.0, 1.0],
-      [0.3, 0.8],
-      [0.6, 0.4],
+      [0.0, 0.8],
+      [0.3, 0.5],
+      [0.6, 0.2],
       [1.0, 0.0],
     ],
-    dataWeight: 0.07,
+    dataWeight: 0.05,
   },
 
   altocumulus: {
@@ -175,22 +170,21 @@ export const CLOUD_TYPES: Record<string, CloudTypeConfig> = {
     name: 'Altocumulus',
     minAlt: 2000, maxAlt: 6000, typicalAlt: 4000,
     color: [0.88, 0.90, 0.96],
-    opacityRange: [0.20, 0.50],
-    sizeRange: [10, 26],
-    density: 3,
+    opacityRange: [0.08, 0.30],
+    sizeRange: [6, 18],
+    density: 2,
     noiseScale: 1.2,
     edgeHardness: 0.55,
     erosionDepth: 0.45,
     worleySpherical: 0.7,
-    // Mid-level puffs
     coverageCurve: [
       [0.0, 0.0],
-      [0.2, 0.3],
-      [0.5, 0.8],
-      [0.8, 0.5],
+      [0.2, 0.2],
+      [0.5, 0.5],
+      [0.8, 0.3],
       [1.0, 0.0],
     ],
-    dataWeight: 0.10,
+    dataWeight: 0.08,
   },
 };
 

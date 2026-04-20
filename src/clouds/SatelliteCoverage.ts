@@ -49,45 +49,38 @@ const WMS_HEIGHT = 512;
 /** Noise detail parameters */
 const NOISE_OCTAVES = 4;
 const NOISE_FREQUENCY = 6.0;
-const NOISE_MIN_VALUE = 0.35; // EVE: "minimum value so it doesn't eat your cloud map"
+const NOISE_MIN_VALUE = 0.15; // EVE: noise adds texture, not base density
 
 // ── GIBS Configuration ─────────────────────────────────────────────────
 
 /**
  * GIBS WMS layers for cloud imagery.
- * Ordered by preference: best global coverage first.
- *
- * Layer IDs verified from GIBS GetCapabilities:
- * https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/1.0.0/WMTSCapabilities.xml
+ * Direct cloud fraction products first (give us 0-1 values).
  */
 const GIBS_LAYERS = [
-  // VIIRS True Color — best global daily coverage, clouds clearly visible
-  {
-    id: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
-    name: 'VIIRS SNPP True Color',
-    tileMatrix: '250m',
-    temporal: 'daily',   // daily snapshots
-  },
-  // MODIS Terra True Color — also global daily
-  {
-    id: 'MODIS_Terra_CorrectedReflectance_TrueColor',
-    name: 'MODIS Terra True Color',
-    tileMatrix: '250m',
-    temporal: 'daily',
-  },
-  // VIIRS Cloud Optical Thickness — direct cloud property
-  {
-    id: 'VIIRS_SNPP_Cloud_Optical_Thickness',
-    name: 'VIIRS Cloud Optical Thickness',
-    tileMatrix: '1km',
-    temporal: 'daily',
-  },
-  // MODIS Cloud Fraction — direct cloud fraction product
+  // MODIS Cloud Fraction — direct 0-100% cloud fraction, color-mapped
   {
     id: 'MODIS_Terra_Cloud_Fraction_Day',
     name: 'MODIS Cloud Fraction',
     tileMatrix: '1km',
     temporal: 'daily',
+    isDirectProduct: true,
+  },
+  // MODIS Cloud Optical Thickness — direct cloud thickness
+  {
+    id: 'MODIS_Terra_Cloud_Optical_Thickness_Day',
+    name: 'MODIS Cloud Optical Thickness',
+    tileMatrix: '1km',
+    temporal: 'daily',
+    isDirectProduct: true,
+  },
+  // VIIRS True Color — fallback, visual cloud detection
+  {
+    id: 'VIIRS_SNPP_CorrectedReflectance_TrueColor',
+    name: 'VIIRS SNPP True Color',
+    tileMatrix: '250m',
+    temporal: 'daily',
+    isDirectProduct: false,
   },
 ];
 
@@ -219,7 +212,7 @@ function getYesterdayString(): string {
  * Try to fetch a global satellite image from GIBS.
  * Attempts multiple layers and dates until one succeeds.
  */
-async function fetchGibsImage(): Promise<{ imageData: ImageData; layer: string } | null> {
+async function fetchGibsImage(): Promise<{ imageData: ImageData; layer: string; isDirectProduct: boolean } | null> {
   const dates = [getTodayString(), getYesterdayString()];
 
   for (const layer of GIBS_LAYERS) {
@@ -229,17 +222,36 @@ async function fetchGibsImage(): Promise<{ imageData: ImageData; layer: string }
       try {
         const result = await fetchAndExtractPixels(url);
         if (result) {
+          // Check for "no data" — all pixels are black/transparent
+          const hasData = checkImageData(result);
+          if (!hasData) {
+            console.log(`[SatCoverage] ${layer.name} @ ${date}: no data (all black)`);
+            continue;
+          }
           console.log(`[SatCoverage] GIBS loaded: ${layer.name} @ ${date}`);
-          return { imageData: result, layer: layer.name };
+          return { imageData: result, layer: layer.name, isDirectProduct: layer.isDirectProduct ?? false };
         }
       } catch (e) {
-        // Try next combination
         continue;
       }
     }
   }
 
   return null;
+}
+
+/**
+ * Check if an image has actual data (not all black/zero).
+ */
+function checkImageData(imageData: ImageData): boolean {
+  const { data } = imageData;
+  let nonZero = 0;
+  const sampleStep = 64; // sample every 64th pixel for speed
+  for (let i = 0; i < data.length; i += sampleStep * 4) {
+    if (data[i] > 5 || data[i+1] > 5 || data[i+2] > 5) nonZero++;
+  }
+  const totalSampled = Math.floor(data.length / (sampleStep * 4));
+  return nonZero > totalSampled * 0.01; // at least 1% non-zero pixels
 }
 
 /**
@@ -289,21 +301,18 @@ async function fetchAndExtractPixels(url: string): Promise<ImageData | null> {
 /**
  * Convert satellite image pixels to cloud coverage map.
  *
- * For true-color imagery (VIIRS/MODIS Corrected Reflectance):
- *   - Clouds are bright (high R, G, B)
- *   - Land/ocean is darker
- *   - Coverage = normalized brightness with threshold
+ * For direct cloud products (MODIS Cloud Fraction):
+ *   Color-mapped: R channel encodes cloud fraction (purple=0%, red=100%)
  *
- * For cloud property layers (Cloud Fraction, Optical Thickness):
- *   - Direct value extraction from specific channels
+ * For true-color imagery (VIIRS/MODIS Corrected Reflectance):
+ *   Clouds are bright + low saturation, land/ocean is darker
  */
-function pixelsToCoverage(imageData: ImageData): Float32Array {
+function pixelsToCoverage(imageData: ImageData, isDirectProduct: boolean = false): Float32Array {
   const { data, width, height } = imageData;
   const coverage = new Float32Array(GRID_W * GRID_H);
 
   for (let j = 0; j < GRID_H; j++) {
     for (let i = 0; i < GRID_W; i++) {
-      // Map grid cell to pixel coordinates
       const px = Math.floor((i / GRID_W) * width);
       const py = Math.floor((j / GRID_H) * height);
       const pIdx = (py * width + px) * 4;
@@ -319,25 +328,35 @@ function pixelsToCoverage(imageData: ImageData): Float32Array {
         continue;
       }
 
-      // Brightness-based cloud detection
-      // Works for: Corrected Reflectance (true color) imagery
-      const brightness = (r + g + b) / (3 * 255);
+      // Skip all-black pixels (no satellite data for this area)
+      if (r + g + b === 0) {
+        coverage[j * GRID_W + i] = 0;
+        continue;
+      }
 
-      // Clouds are bright AND have low color saturation
-      // (clouds are white/grey, land/ocean has color)
-      const maxCh = Math.max(r, g, b);
-      const minCh = Math.min(r, g, b);
-      const saturation = maxCh > 0 ? (maxCh - minCh) / maxCh : 0;
+      let cloudScore: number;
 
-      // High brightness + low saturation = cloud
-      // Low saturation because clouds are grey/white
-      let cloudScore = brightness * (1.0 - saturation * 0.7);
+      if (isDirectProduct) {
+        // Direct cloud product (e.g., MODIS Cloud Fraction)
+        // Color ramp: purple(0%) → cyan(50%) → red(100%)
+        // Red channel is the primary indicator
+        cloudScore = r / 255;
 
-      // Threshold and normalize
-      // Values below 0.4 are unlikely to be clouds
-      const threshold = 0.40;
-      const transition = 0.35;
-      cloudScore = smoothstep((cloudScore - threshold) / transition);
+        // Refine with other channels:
+        // Pure purple (low CF): high B, low R
+        // Pure red (high CF): high R, low B
+        // Adjust: when B is high and R is low, it's very low CF
+        if (b > r && b > 100) {
+          cloudScore = Math.min(cloudScore, 0.3);
+        }
+      } else {
+        // Visual imagery: brightness + saturation analysis
+        const brightness = (r + g + b) / (3 * 255);
+        const maxCh = Math.max(r, g, b);
+        const minCh = Math.min(r, g, b);
+        const saturation = maxCh > 0 ? (maxCh - minCh) / maxCh : 0;
+        cloudScore = brightness * (1.0 - saturation * 0.7);
+      }
 
       coverage[j * GRID_W + i] = Math.max(0, Math.min(1, cloudScore));
     }
@@ -451,12 +470,12 @@ function applyPriors(coverage: Float32Array): Float32Array {
     for (let i = 0; i < GRID_W; i++) {
       const idx = j * GRID_W + i;
       // ITCZ
-      const itcz = Math.exp(-absLat * absLat * 0.01) * 0.12;
+      const itcz = Math.exp(-absLat * absLat * 0.01) * 0.06;
       // Storm tracks
-      const storm30 = Math.exp(-Math.pow(absLat - 30, 2) * 0.02) * 0.06;
-      const storm60 = Math.exp(-Math.pow(absLat - 60, 2) * 0.02) * 0.04;
+      const storm30 = Math.exp(-Math.pow(absLat - 30, 2) * 0.02) * 0.03;
+      const storm60 = Math.exp(-Math.pow(absLat - 60, 2) * 0.02) * 0.02;
       // Polar penalty
-      const polar = absLat > 70 ? -0.08 * ((absLat - 70) / 20) : 0;
+      const polar = absLat > 70 ? -0.05 * ((absLat - 70) / 20) : 0;
 
       result[idx] = Math.max(0, Math.min(1, result[idx] + itcz + storm30 + storm60 + polar));
     }
@@ -502,7 +521,7 @@ export class SatelliteCoverage {
     try {
       const gibResult = await fetchGibsImage();
       if (gibResult) {
-        coverage = pixelsToCoverage(gibResult.imageData);
+        coverage = pixelsToCoverage(gibResult.imageData, gibResult.isDirectProduct);
         source = `GIBS (${gibResult.layer})`;
         console.log('[SatCoverage] GIBS satellite data loaded');
       }

@@ -20,11 +20,9 @@
  */
 
 import maplibregl from 'maplibre-gl';
-import type { WeatherManager } from '../weather/WeatherManager';
 import {
-  CLOUD_TYPES, ALL_CLOUD_TYPES, evalCoverageCurve,
-  weatherToCloudTypes, getCloudTypeIndex,
-  type CloudTypeConfig,
+  ALL_CLOUD_TYPES, evalCoverageCurve,
+  getCloudTypeIndex,
 } from './CloudTypes';
 import { generateCloudNoise, generateHeightNoise, generateStormNoise } from '../weather/CloudNoise';
 
@@ -59,7 +57,7 @@ const BANDS: BandConfig[] = ALL_CLOUD_TYPES.map(ct => ({
   color: ct.color,
   sizeRange: ct.sizeRange,
   opacityRange: ct.opacityRange,
-  maxPoints: Math.round(ct.density * 15000),
+  maxPoints: Math.round(ct.density * 5000),
   density: ct.density,
   dataWeight: ct.dataWeight,
   noiseScale: ct.noiseScale,
@@ -396,7 +394,6 @@ function toMercator(lat: number, lon: number): { x: number; y: number } {
 // ── Main Class ─────────────────────────────────────────────────────────
 
 export class CloudPointLayer {
-  private weather: WeatherManager;
   private map: maplibregl.Map | null = null;
   private gl: WebGLRenderingContext | null = null;
   private program: WebGLProgram | null = null;
@@ -421,17 +418,12 @@ export class CloudPointLayer {
   private noiseW = 256;
   private noiseH = 128;
 
-  constructor(weather: WeatherManager) {
-    this.weather = weather;
-    this.weather.on('dataLoaded', () => { this.dirty = true; this.map?.triggerRepaint(); });
-    this.weather.on('cloudLayersLoaded', () => { this.dirty = true; this.map?.triggerRepaint(); });
-    this.weather.on('timeChange', () => { this.dirty = true; });
+  // Coverage map (from live-cloud-maps)
+  private coverageData: Float32Array | null = null;
+  private coverageW = 0;
+  private coverageH = 0;
 
-    window.addEventListener('weather-grid-updated', () => {
-      this.dirty = true;
-      this.map?.triggerRepaint();
-    });
-
+  constructor() {
     // Pre-generate noise textures
     this.generateNoiseTextures();
   }
@@ -581,88 +573,46 @@ export class CloudPointLayer {
   // ── Wind Animation ────────────────────────────────────────────────
 
   private updateWindOffset(): void {
-    const wf = this.weather.getWindField('surface');
-    if (!wf) return;
-
-    // Sample global average wind direction
-    const { u, v } = wf;
-    let avgU = 0, avgV = 0, count = 0;
-    for (let i = 0; i < u.length; i += 100) {
-      avgU += u[i];
-      avgV += v[i];
-      count++;
-    }
-    if (count > 0) {
-      avgU /= count;
-      avgV /= count;
-    }
-
-    // Accumulate offset (scaled for visual effect)
-    this.windOffsetX += avgU * 0.0001;
-    this.windOffsetY += avgV * 0.0001;
+    // Slow global drift — simulates average wind flow
+    this.windOffsetX += 0.0002;
+    this.windOffsetY += 0.00005;
   }
 
-  // ── Data Upload (EVE-inspired placement) ───────────────────────────
+  // ── Data Upload (EVE-style: texture brightness → particle placement) ─
 
+  /**
+   * EVE approach: the cloud texture IS the cloud definition.
+   * Brightness at each pixel directly controls:
+   *   - Whether clouds exist (threshold)
+   *   - How many particles (brightness → count)
+   *   - How large they are (brightness → size)
+   *   - Their opacity (brightness → alpha)
+   *   - Altitude distribution (noise → height variation)
+   */
   private upload(gl: WebGLRenderingContext): void {
-    const layers = this.weather.getCloudLayers();
-    const grid = this.weather.getGrid('surface');
-
-    let cloudData: Float32Array | null = null;
-    let w = 360, h = 180;
-    let dataSource = 'none';
-
-    // Get cloud fraction data
-    if (layers) {
-      w = layers.width; h = layers.height;
-      cloudData = new Float32Array(w * h);
-      for (let i = 0; i < w * h; i++) {
-        cloudData[i] = Math.max(layers.low[i], layers.medium[i], layers.high[i]);
-      }
-      dataSource = `GFS (${layers.source})`;
-    } else if (grid?.fields.cloudFraction) {
-      cloudData = grid.fields.cloudFraction;
-      w = grid.width; h = grid.height;
-      dataSource = 'Open-Meteo';
-    }
-
-    if (!cloudData) {
-      console.warn('[Clouds] No data — skipping upload');
+    if (!this.coverageData) {
+      // No coverage data yet — wait for LiveCloudMap to provide it
       for (const band of BANDS) this.vbos.get(band.id)!.count = 0;
       this.dirty = false;
       return;
     }
 
-    // Get additional fields for cloud type determination
-    const humidity = grid?.fields.humidity;
-    const temperature = grid?.fields.temperature;
+    const cloudData = this.coverageData;
+    const w = this.coverageW;
+    const h = this.coverageH;
 
-    // Upload per band with EVE-style placement
     for (const band of BANDS) {
-      const pts = new Float32Array(band.maxPoints * 14); // 14 floats per point
+      const pts = new Float32Array(band.maxPoints * 14);
       let n = 0;
 
       for (let j = 0; j < h && n < band.maxPoints; j++) {
         for (let i = 0; i < w && n < band.maxPoints; i++) {
-          let cf = cloudData[j * w + i];
-          if (cf > 1) cf /= 100;
-          if (cf < 0.03) continue;
+          const brightness = cloudData[j * w + i];
 
-          // Apply data weight (like EVE's cloudFraction × dataWeight)
-          let density = cf * band.dataWeight;
+          // EVE: threshold — skip clear pixels
+          if (brightness < 0.15) continue;
 
-          // Modulate with noise texture (EVE's coverage map interaction)
-          if (this.cloudNoise) {
-            const ni = Math.floor((i / w) * (this.noiseW - 1));
-            const nj = Math.floor((j / h) * (this.noiseH - 1));
-            const noiseVal = this.cloudNoise[nj * this.noiseW + ni];
-            // EVE: noise interacts with coverage, minimum threshold
-            density *= Math.max(0.1, noiseVal);
-          }
-
-          if (density < 0.02) continue;
-
-          // Height variation from noise (EVE's coverage curve modulation)
+          // Height variation from noise
           let heightMod = 1.0;
           if (this.heightNoise) {
             const ni = Math.floor((i / w) * (this.noiseW - 1));
@@ -670,43 +620,21 @@ export class CloudPointLayer {
             heightMod = 0.4 + this.heightNoise[nj * this.noiseW + ni] * 0.6;
           }
 
-          // Storm modulation for cumulonimbus
-          if (band.cloudTypeId === 'cumulonimbus' && this.stormNoise) {
-            const ni = Math.floor((i / w) * (this.noiseW - 1));
-            const nj = Math.floor((j / h) * (this.noiseH - 1));
-            const stormVal = this.stormNoise[nj * this.noiseW + ni];
-            density *= stormVal;
-            if (density < 0.03) continue;
-          }
-
-          // Number of points scales with density
-          const numPts = Math.max(1, Math.ceil(density * band.density));
+          // EVE: brightness directly → number of particles
+          // Bright pixels get more particles, dark pixels get fewer
+          const numPts = Math.max(1, Math.ceil(brightness * band.density));
 
           const lon = (i / w) * 360 - 180 + 0.5;
           const lat = 90 - (j / h) * 180 - 0.5;
 
-          // Weather-based cloud type check
-          let typeMatch = 1.0;
-          if (humidity && temperature) {
-            const hum = humidity[j * w + i];
-            const temp = temperature[j * w + i];
-            const types = weatherToCloudTypes(temp, hum, cf, lat);
-            // Find this band's type in the mix
-            const match = types.find(t => t.type.id === band.cloudTypeId);
-            typeMatch = match ? match.weight * 3 : 0.3; // fallback if type not matched
-          }
-
-          if (typeMatch < 0.05) continue;
-
           for (let p = 0; p < numPts && n < band.maxPoints; p++) {
-            // Jitter placement (EVE uses noise for this)
             const jLon = (Math.random() - 0.5) * (360 / w) * 1.1;
             const jLat = (Math.random() - 0.5) * (180 / h) * 1.1;
 
-            // Altitude with coverage curve modulation
+            // Altitude with coverage curve
             const altFrac = Math.random();
             const curveVal = evalCoverageCurve(band.coverageCurve, altFrac);
-            if (curveVal < 0.05 && Math.random() > 0.3) continue; // skip low-density portions
+            if (curveVal < 0.05 && Math.random() > 0.3) continue;
 
             const altMeters = Math.max(
               10,
@@ -716,31 +644,30 @@ export class CloudPointLayer {
             const clampLat = Math.max(-85, Math.min(85, lat + jLat));
             const m = toMercator(clampLat, lon + jLon);
 
-            // Size varies with density and curve value
+            // EVE: brightness → size and opacity
             const sizeVar = band.sizeRange[0]
-              + density * (band.sizeRange[1] - band.sizeRange[0]) * (0.5 + Math.random() * 0.5)
-              * curveVal;
+              + brightness * (band.sizeRange[1] - band.sizeRange[0])
+              * (0.5 + Math.random() * 0.5) * curveVal;
             const alpha = (band.opacityRange[0]
-              + density * (band.opacityRange[1] - band.opacityRange[0]))
-              * typeMatch * curveVal;
+              + brightness * (band.opacityRange[1] - band.opacityRange[0]))
+              * curveVal;
             const rot = Math.random() * Math.PI * 2;
 
-            // Pack into interleaved buffer (14 floats per point)
             const o = n * 14;
-            pts[o]    = m.x;                     // aMercator.x
-            pts[o+1]  = m.y;                     // aMercator.y
-            pts[o+2]  = altMeters;               // aElevation
-            pts[o+3]  = sizeVar;                 // aSize
-            pts[o+4]  = band.color[0];           // aColor.r
-            pts[o+5]  = band.color[1];           // aColor.g
-            pts[o+6]  = band.color[2];           // aColor.b
-            pts[o+7]  = Math.min(1, alpha);      // aColor.a
-            pts[o+8]  = rot;                     // aRot
-            pts[o+9]  = band.cloudTypeIndex;     // aCloudType
-            pts[o+10] = density;                 // aDensity
-            pts[o+11] = band.noiseScale;         // aNoiseScale
-            pts[o+12] = band.edgeHardness;       // aEdgeHardness
-            pts[o+13] = band.erosionDepth;       // aErosionDepth
+            pts[o]    = m.x;
+            pts[o+1]  = m.y;
+            pts[o+2]  = altMeters;
+            pts[o+3]  = sizeVar;
+            pts[o+4]  = band.color[0];
+            pts[o+5]  = band.color[1];
+            pts[o+6]  = band.color[2];
+            pts[o+7]  = Math.min(1, alpha);
+            pts[o+8]  = rot;
+            pts[o+9]  = band.cloudTypeIndex;
+            pts[o+10] = brightness;
+            pts[o+11] = band.noiseScale;
+            pts[o+12] = band.edgeHardness;
+            pts[o+13] = band.erosionDepth;
             n++;
           }
         }
@@ -756,9 +683,18 @@ export class CloudPointLayer {
     this.dirty = false;
     const total = [...this.vbos.values()].reduce((s, b) => s + b.count, 0);
     console.log(
-      `[Clouds] ${total} pts from ${dataSource}: ` +
+      `[Clouds] ${total} pts from texture (${w}x${h}): ` +
       BANDS.map(b => `${b.id}=${this.vbos.get(b.id)!.count}`).join(' ')
     );
+  }
+
+  setCoverageMap(map: { data: Float32Array; width: number; height: number; source: string }): void {
+    this.coverageData = map.data;
+    this.coverageW = map.width;
+    this.coverageH = map.height;
+    this.dirty = true;
+    console.log(`[Clouds] Coverage map set: ${map.width}x${map.height} (${map.source})`);
+    this.map?.triggerRepaint();
   }
 
   setVisible(v: boolean): void {
