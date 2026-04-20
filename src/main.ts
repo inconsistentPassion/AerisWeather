@@ -3,21 +3,19 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera
- * deck.gl         → clouds (point cloud), wind (lines), rain (lines)
+ * Custom WebGL    → 3D cloud points (globe-native)
+ * Canvas 2D       → wind streaks, rain drops
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
-import { MapboxOverlay } from '@deck.gl/mapbox';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
 import { RainEffect } from './clouds/RainEffect';
 import { CloudPointLayer } from './clouds/CloudPointLayer';
-import { DeckLayerManager } from './clouds/DeckLayerManager';
 
-// ── Dark style ────────────────────────────────────────────────────────
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
 async function init() {
@@ -54,9 +52,7 @@ async function init() {
           const y = parseInt(match[3]);
           if (z > 8) {
             const scale = 1 << (z - 8);
-            const cx = Math.floor(x / scale);
-            const cy = Math.floor(y / scale);
-            return { url: url.replace(`/${z}/${x}/${y}.png`, `/8/${cx}/${cy}.png`) };
+            return { url: url.replace(`/${z}/${x}/${y}.png`, `/8/${Math.floor(x/scale)}/${Math.floor(y/scale)}.png`) };
           }
         }
       }
@@ -64,16 +60,14 @@ async function init() {
     },
   });
 
-  // Globe projection
   map.on('style.load', () => {
     try { (map as any).setProjection({ type: 'globe' }); }
     catch (e) { console.warn('setProjection failed:', e); }
   });
 
-  // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── 3D Terrain + hillshade ─────────────────────────────────────────
+  // ── Terrain ────────────────────────────────────────────────────────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -82,7 +76,6 @@ async function init() {
       encoding: 'terrarium',
     });
     map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 });
-
     map.addLayer({
       id: 'hillshade-layer',
       type: 'hillshade',
@@ -95,87 +88,58 @@ async function init() {
         'hillshade-accent-color': 'rgba(15, 20, 35, 0.5)',
       },
     });
-    console.log('[Terrain] 3D elevation enabled');
-  } catch (e) {
-    console.warn('[Terrain] Failed:', e);
-  }
+  } catch (e) { console.warn('[Terrain] Failed:', e); }
 
-  // ── Suppress non-critical errors ───────────────────────────────────
+  // Suppress non-critical errors
   map.on('error', (e) => {
-    const msg = e.error?.message || e.error?.toString() || '';
-    if (msg.includes('rainviewer') || msg.includes('zoom level') ||
-        msg.includes('404') || msg.includes('not supported')) return;
+    const msg = e.error?.message || '';
+    if (msg.includes('rainviewer') || msg.includes('404') || msg.includes('not supported')) return;
     console.error('MapLibre error:', e);
   });
 
-  // ── Shared deck.gl overlay ─────────────────────────────────────────
-  const deckOverlay = new MapboxOverlay({ interleaved: true, layers: [] });
-  (map as any).addControl(deckOverlay);
-  const deckManager = new DeckLayerManager(deckOverlay);
+  // ── Cloud layer (custom WebGL, globe-native) ───────────────────────
+  const cloudLayer = new CloudPointLayer(weather);
+  map.addLayer(cloudLayer.getLayer());
+  cloudLayer.setVisible(true);
 
-  // ── Weather layers ─────────────────────────────────────────────────
-  const windParticles = new WindParticleLayer(map, weather, deckManager);
+  // ── Wind + Rain (canvas 2D overlays) ───────────────────────────────
+  const windParticles = new WindParticleLayer(map, weather);
   const radarLayer = new RadarLayer(map, weather);
-  const rainEffect = new RainEffect(map, deckManager);
-  const cloudPointLayer = new CloudPointLayer(weather, deckManager);
+  const rainEffect = new RainEffect(map);
 
   radarLayer.setVisible(true);
   rainEffect.setVisible(true);
-  cloudPointLayer.setVisible(true);
   windParticles.setVisible(true);
 
   // ── UI ─────────────────────────────────────────────────────────────
-  const ui = createUI(uiContainer, weather, {
+  createUI(uiContainer, weather, {
     onTimeChange: (t) => weather.setTime(t),
     onLevelChange: (l) => weather.setLevel(l),
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
-
       switch (layer) {
-        case 'wind':
-          windParticles.setVisible(active);
-          break;
-        case 'radar':
-          radarLayer.setVisible(active);
-          rainEffect.setVisible(active);
-          break;
-        case 'clouds':
-          cloudPointLayer.setVisible(active);
-          break;
+        case 'wind': windParticles.setVisible(active); break;
+        case 'radar': radarLayer.setVisible(active); rainEffect.setVisible(active); break;
+        case 'clouds': cloudLayer.setVisible(active); map.triggerRepaint(); break;
       }
     },
     onCameraMode: (mode) => {
-      if (mode === 'orbit') {
-        map.easeTo({ pitch: 49, bearing: -20, duration: 1000 });
-      } else if (mode === 'freeflight') {
-        map.easeTo({ pitch: 75, bearing: map.getBearing(), duration: 1000 });
-      }
+      if (mode === 'orbit') map.easeTo({ pitch: 49, bearing: -20, duration: 1000 });
+      else if (mode === 'freeflight') map.easeTo({ pitch: 75, bearing: map.getBearing(), duration: 1000 });
     },
   });
 
-  // ── Fetch weather data in background ───────────────────────────────
+  // ── Load data ──────────────────────────────────────────────────────
   weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
-      case 'Space':
-        e.preventDefault();
-        break;
-      case 'KeyR':
-        map.flyTo({ center: [0, 20], zoom: 1.8, pitch: 52, bearing: -20, duration: 1500 });
-        break;
-      case 'Digit6':
-        document.querySelector('[data-layer="clouds"]')?.dispatchEvent(new Event('click'));
-        break;
-      case 'Equal':
-      case 'NumpadAdd':
-        map.zoomIn();
-        break;
-      case 'Minus':
-      case 'NumpadSubtract':
-        map.zoomOut();
-        break;
+      case 'Space': e.preventDefault(); break;
+      case 'KeyR': map.flyTo({ center: [0, 20], zoom: 1.8, pitch: 52, bearing: -20, duration: 1500 }); break;
+      case 'Digit6': document.querySelector('[data-layer="clouds"]')?.dispatchEvent(new Event('click')); break;
+      case 'Equal': case 'NumpadAdd': map.zoomIn(); break;
+      case 'Minus': case 'NumpadSubtract': map.zoomOut(); break;
     }
   });
 }
