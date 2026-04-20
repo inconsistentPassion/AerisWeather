@@ -3,18 +3,16 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera
- * Custom WebGL    → clouds (3D points), wind (lines), rain (lines)
- * All GPU-rendered, zero map.project() calls per frame.
+ * deck.gl         → clouds (ScatterplotLayer), wind (PathLayer), rain (ScatterplotLayer)
+ * All GPU-accelerated via deck.gl + MapboxOverlay.
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
-import { WindParticleLayer } from './weather/WindParticleLayer';
+import { DeckLayers } from './weather/DeckLayers';
 import { RadarLayer } from './clouds/RadarLayer';
-import { RainEffect } from './clouds/RainEffect';
-import { CloudPointLayer } from './clouds/CloudPointLayer';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -94,20 +92,13 @@ async function init() {
     console.error('MapLibre error:', e);
   });
 
-  // ── Custom WebGL layers (all GPU-accelerated) ──────────────────────
-  const cloudLayer = new CloudPointLayer(weather);
-  const windLayer = new WindParticleLayer(weather);
-  const rainEffect = new RainEffect(map);
+  // ── deck.gl layers (via MapboxOverlay) ─────────────────────────────
+  const deckLayers = new DeckLayers(weather);
+  map.addControl(deckLayers.getControl() as any);
+  deckLayers.onMapReady(map);
+
+  // ── RainViewer radar (native MapLibre raster — separate from deck.gl) ──
   const radarLayer = new RadarLayer(map, weather);
-
-  // Add layers in order (clouds behind, rain/wind in front)
-  map.addLayer(cloudLayer.getLayer());
-  map.addLayer(rainEffect.getLayer());
-  map.addLayer(windLayer.getLayer());
-
-  cloudLayer.setVisible(true);
-  rainEffect.setVisible(true);
-  windLayer.setVisible(true);
   radarLayer.setVisible(true);
 
   // ── UI ─────────────────────────────────────────────────────────────
@@ -117,9 +108,9 @@ async function init() {
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
       switch (layer) {
-        case 'wind': windLayer.setVisible(active); map.triggerRepaint(); break;
-        case 'radar': radarLayer.setVisible(active); rainEffect.setVisible(active); map.triggerRepaint(); break;
-        case 'clouds': cloudLayer.setVisible(active); map.triggerRepaint(); break;
+        case 'wind': deckLayers.setVisible('wind', active); break;
+        case 'radar': radarLayer.setVisible(active); deckLayers.setVisible('radar', active); break;
+        case 'clouds': deckLayers.setVisible('clouds', active); break;
       }
     },
     onCameraMode: (mode) => {

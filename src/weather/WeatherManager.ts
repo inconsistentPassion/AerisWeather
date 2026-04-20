@@ -17,6 +17,7 @@ export class WeatherManager {
   private currentLevel: WeatherLevel = 'surface';
   private activeLayers: Set<WeatherLayer> = new Set(['wind', 'radar', 'clouds']);
   private isLoading: boolean = false;
+  private backendAvailable: boolean | null = null; // null = unknown, true/false = checked
 
   private listeners: Map<string, Set<Function>> = new Map();
 
@@ -60,12 +61,43 @@ export class WeatherManager {
   }
 
   /**
+   * Check if backend is reachable (cached).
+   */
+  private async checkBackend(): Promise<boolean> {
+    if (this.backendAvailable !== null) return this.backendAvailable;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${API_BASE}/api/weather/grid?level=surface&time=${new Date().toISOString()}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      this.backendAvailable = res.ok;
+    } catch {
+      this.backendAvailable = false;
+    }
+    if (!this.backendAvailable) {
+      console.log('[Weather] Backend not available, using Open-Meteo only');
+    }
+    return this.backendAvailable;
+  }
+
+  /**
    * Fetch 3-layer cloud data from the backend.
    */
   async fetchCloudLayers(): Promise<CloudLayers | null> {
+    // Skip if backend is known to be down
+    const available = await this.checkBackend();
+    if (!available) return null;
+
     try {
       const timeStr = new Date(this.currentTime).toISOString();
-      const res = await fetch(`${API_BASE}/api/weather/cloud-layers?time=${timeStr}&width=360&height=180`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${API_BASE}/api/weather/cloud-layers?time=${timeStr}&width=360&height=180`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
       if (!res.ok) return null;
 
       const data = await res.json();
@@ -85,7 +117,13 @@ export class WeatherManager {
       this.emit('cloudLayersLoaded', this.cloudLayers);
       return this.cloudLayers;
     } catch (e) {
-      console.warn('[Weather] Cloud layers fetch error:', e);
+      // Backend went down after initial check
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        this.backendAvailable = false;
+        console.log('[Weather] Backend timeout, disabling cloud layers fetch');
+      } else {
+        console.warn('[Weather] Cloud layers fetch error:', e);
+      }
       return null;
     }
   }
