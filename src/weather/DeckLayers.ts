@@ -14,6 +14,7 @@
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { PointCloudLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
 import type { WeatherManager } from './WeatherManager';
+import { loadRadarCells, getCachedRadarCells } from './RadarData';
 import type maplibregl from 'maplibre-gl';
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -123,6 +124,13 @@ export class DeckLayers {
 
   onMapReady(map: maplibregl.Map): void {
     this.map = map;
+
+    // Load radar data immediately, then start animation
+    loadRadarCells().then(() => {
+      this.buildRainData();
+      this.updateLayers();
+    });
+
     this.startAnimation();
 
     // Re-render on map interaction so deck.gl stays synced
@@ -311,39 +319,29 @@ export class DeckLayers {
     this.windData = trails;
   }
 
-  // ── Rain ────────────────────────────────────────────────────────────
+  // ── Rain (from real radar data) ──────────────────────────────────────
 
   private buildRainData(): void {
-    const grid = this.weather.getGrid('surface');
-    if (!grid) { this.rainData = []; return; }
-    const { fields } = grid;
-    if (!fields?.cloudFraction || !fields?.humidity) { this.rainData = []; return; }
+    const cells = getCachedRadarCells();
+    if (cells.length === 0) { this.rainData = []; return; }
 
-    const { cloudFraction, humidity } = fields;
-    const w = 360, h = 180;
     const drops: RainDrop[] = [];
 
-    for (let j = 0; j < h; j += 6) {
-      for (let i = 0; i < w; i += 6) {
-        let cf = cloudFraction[j * w + i];
-        const hum = humidity[j * w + i];
-        if (cf > 1) cf /= 100;
-        if (cf < 0.5 || hum < 65) continue;
+    // Sample radar cells into deck.gl points
+    // Each cell becomes a rain drop with color based on intensity
+    const step = Math.max(1, Math.floor(cells.length / 3000)); // cap at ~3000 drops
+    for (let i = 0; i < cells.length; i += step) {
+      const cell = cells[i];
+      if (cell.intensity < 0.1) continue;
 
-        const intensity = (cf - 0.5) * 2 * Math.max(0, (hum - 65) / 35);
-        if (intensity < 0.1) continue;
+      const bin = Math.min(4, Math.floor(cell.intensity * 5));
+      const [r, g, b] = RAIN_COLORS[bin];
 
-        const lon = (i / w) * 360 - 180 + (Math.random() - 0.5) * 3;
-        const lat = 90 - (j / h) * 180 + (Math.random() - 0.5) * 2;
-        const bin = Math.min(4, Math.floor(intensity * 5));
-        const [r, g, b] = RAIN_COLORS[bin];
-
-        drops.push({
-          position: [lon, lat, 0],
-          color: [r, g, b],
-          radius: 2000 + intensity * 5000,
-        });
-      }
+      drops.push({
+        position: [cell.lon, cell.lat, 0],
+        color: [r, g, b],
+        radius: 2000 + cell.intensity * 8000,
+      });
     }
 
     this.rainData = drops;
@@ -353,11 +351,19 @@ export class DeckLayers {
 
   private startAnimation(): void {
     let lastFrame = 0;
+    let lastRadarRefresh = 0;
     const tick = (now: number) => {
       if (now - lastFrame > 66) { // ~15fps
         lastFrame = now;
         this.frameCount++;
         this.advectAndBuildWind();
+
+        // Refresh radar every 5 minutes
+        if (now - lastRadarRefresh > 5 * 60 * 1000) {
+          lastRadarRefresh = now;
+          loadRadarCells().then(() => this.buildRainData());
+        }
+
         if (this.frameCount % 3 === 0) this.buildRainData();
         this.updateLayers();
       }
