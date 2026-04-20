@@ -596,34 +596,14 @@ export class DeckLayers {
   private updateLayers(): void {
     const layers: any[] = [];
 
-    // ── Global 2D Cloud Coverage (Windy-style) ──────────────────────
-    // CONFIRMS DATA IS FLOWING — colored dots for every cloudy grid cell
-    if (this.cloudVisible && this.cloudDots.length > 0) {
-      layers.push(new ScatterplotLayer({
-        id: 'global-cloud-dots',
-        data: this.cloudDots,
-        getPosition: (d: CloudDot) => d.position,
-        getRadius: (d: CloudDot) => d.radius,
-        getFillColor: (d: CloudDot) => d.color,
-        radiusUnits: 'meters',
-        radiusMinPixels: 2,
-        radiusMaxPixels: 30,
-        opacity: 1.0,
-        pickable: false,
-        transitions: {
-          getFillColor: { duration: 1000 },
-        },
-      }));
-    }
-
-    // ── Rain — PathLayer vertical streaks (NOT circles!) ──────────────
+    // ── Rain — PathLayer vertical streaks ────────────────────────────
     if (this.radarVisible && this.rainData.length > 0) {
       layers.push(new PathLayer({
         id: 'rain-streaks',
         data: this.rainData,
         getPath: (d: RainStreak) => d.path,
         getColor: (d: RainStreak) => d.color,
-        getWidth: 1.8,
+        getWidth: 3.5,
         widthUnits: 'pixels',
         opacity: 0.9,
         pickable: false,

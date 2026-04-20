@@ -14,6 +14,7 @@ import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
 import { CloudPointLayer } from './clouds/CloudPointLayer';
 import { RainEffect } from './clouds/RainEffect';
+import { SatelliteLayer } from './clouds/SatelliteLayer';
 import { CITIES, searchCities, City } from './weather/CitySearch';
 
 // Dark raster style — no CORS issues (unlike Carto vector tiles)
@@ -97,6 +98,9 @@ async function init() {
   map.addLayer(rainEffect.getLayer());
   rainEffect.setVisible(true);
 
+  // ── Satellite IR cloud imagery (RainViewer) ───────────────────────
+  const satelliteLayer = new SatelliteLayer(map);
+
   let currentCity: City | null = null;
 
   // ── UI ─────────────────────────────────────────────────────────────
@@ -106,7 +110,10 @@ async function init() {
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
       deckLayers.setVisible(layer as any, active);
-      if (layer === 'clouds') cloudLayer.setVisible(active);
+      if (layer === 'clouds') {
+        cloudLayer.setVisible(active);
+        satelliteLayer.setVisible(active);
+      }
       if (layer === 'radar') rainEffect.setVisible(active);
     },
     onCameraMode: (mode) => {
