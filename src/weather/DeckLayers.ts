@@ -10,7 +10,7 @@
  */
 
 import { MapboxOverlay } from '@deck.gl/mapbox';
-import { ScatterplotLayer, PathLayer, ColumnLayer } from '@deck.gl/layers';
+import { ScatterplotLayer, PathLayer, PointCloudLayer } from '@deck.gl/layers';
 import type { WeatherManager } from './WeatherManager';
 import { loadRadarCells, getCachedRadarCells } from './RadarData';
 import { generateCloudNoise, generateHeightNoise, generateStormNoise } from './CloudNoise';
@@ -113,6 +113,14 @@ export class DeckLayers {
   // Cloud dots — global 2D visualization
   private cloudDots: CloudDot[] = [];
 
+  // Volumetric 3D clouds — city focus mode
+  private volumetricClouds: Array<{
+    position: [number, number, number];
+    normal: [number, number, number];
+    color: [number, number, number];
+    bandIdx: number;
+  }> = [];
+
   private animId: number | null = null;
   private frameCount = 0;
   private rebuildTimer: ReturnType<typeof setInterval> | null = null;
@@ -183,12 +191,109 @@ export class DeckLayers {
 
   focusCity(city: City | null): void {
     this.focusedCity = city;
+    if (city) {
+      this.generateVolumetricClouds(city);
+    } else {
+      this.volumetricClouds = [];
+    }
     this.updateLayers();
   }
 
   destroy(): void {
     if (this.animId) cancelAnimationFrame(this.animId);
     if (this.rebuildTimer) clearInterval(this.rebuildTimer);
+  }
+
+  // ── Volumetric 3D clouds for city focus ──────────────────────────────
+
+  private generateVolumetricClouds(city: City): void {
+    const seed = Math.round(city.lon * 7 + city.lat * 13) % 1000;
+    const noiseW = 256, noiseH = 128;
+    const cloudNoise = generateCloudNoise(noiseW, noiseH, seed);
+    const heightNoise = generateHeightNoise(noiseW, noiseH, seed + 33);
+    const stormNoise = generateStormNoise(noiseW, noiseH, seed + 77);
+
+    const points: typeof this.volumetricClouds = [];
+    const regionRadius = 0.8;
+    const gridStep = 0.008;
+
+    // Band configs: alt, spread, pointSize(m), color, type
+    const bands = [
+      { alt: 600, spread: 600, color: [248, 248, 255] as [number, number, number], type: 'cumulus' },
+      { alt: 1200, spread: 800, color: [244, 245, 254] as [number, number, number], type: 'cumulus' },
+      { alt: 1800, spread: 1500, color: [200, 205, 218] as [number, number, number], type: 'anvil' },
+      { alt: 3500, spread: 1200, color: [230, 234, 248] as [number, number, number], type: 'stratus' },
+      { alt: 5500, spread: 1800, color: [220, 226, 244] as [number, number, number], type: 'stratus' },
+      { alt: 8000, spread: 2500, color: [208, 216, 240] as [number, number, number], type: 'cirrus' },
+      { alt: 10500, spread: 3000, color: [196, 206, 236] as [number, number, number], type: 'cirrus' },
+    ];
+
+    for (let dy = -regionRadius; dy <= regionRadius; dy += gridStep) {
+      for (let dx = -regionRadius; dx <= regionRadius; dx += gridStep) {
+        const nu = (dx / regionRadius + 1) * 0.5;
+        const nv = (dy / regionRadius + 1) * 0.5;
+        const ni = Math.floor(nu * (noiseW - 1));
+        const nj = Math.floor(nv * (noiseH - 1));
+        const noiseIdx = nj * noiseW + ni;
+        const noiseVal = cloudNoise[noiseIdx];
+        const hVal = heightNoise[noiseIdx];
+        const stormVal = stormNoise[noiseIdx];
+
+        if (noiseVal < 0.05) continue;
+
+        const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
+        const edgeFade = Math.max(0, 1 - dist * dist);
+        const cloudDensity = noiseVal * edgeFade;
+        if (cloudDensity < 0.05) continue;
+
+        const maxBand = Math.ceil((0.3 + hVal * 0.7) * bands.length);
+
+        for (let bi = 0; bi < Math.min(maxBand, bands.length); bi++) {
+          const cfg = bands[bi];
+          if (cfg.type === 'anvil' && stormVal < 0.2) continue;
+
+          let eff = cloudDensity;
+          if (cfg.type === 'anvil') eff *= stormVal * 1.5;
+          if (eff < 0.04) continue;
+
+          const densityMul = cfg.type === 'cirrus' ? 2 : 4;
+          const numPts = Math.max(1, Math.ceil(eff * densityMul));
+
+          for (let p = 0; p < numPts; p++) {
+            const jLon = (Math.random() - 0.5) * gridStep * 1.3;
+            const jLat = (Math.random() - 0.5) * gridStep * 1.3;
+            const heightMod = cfg.type === 'anvil' ? 1.0 + hVal * 0.6 : 0.7 + hVal * 0.3;
+            const alt = cfg.alt * heightMod + (Math.random() - 0.5) * cfg.spread * heightMod;
+            const angle = Math.random() * Math.PI * 2;
+            const tilt = (Math.random() - 0.5) * 0.4;
+            let brightness = 0.85 + eff * 0.15;
+            if (cfg.type === 'anvil') brightness *= 0.7;
+
+            points.push({
+              position: [
+                city.lon + dx + jLon,
+                city.lat + dy + jLat,
+                Math.max(20, alt),
+              ],
+              normal: [
+                Math.cos(angle) * Math.cos(tilt),
+                Math.sin(angle) * Math.cos(tilt),
+                0.75 + Math.sin(tilt) * 0.25,
+              ],
+              color: [
+                Math.round(cfg.color[0] * brightness),
+                Math.round(cfg.color[1] * brightness),
+                Math.round(cfg.color[2] * brightness),
+              ],
+              bandIdx: bi,
+            });
+          }
+        }
+      }
+    }
+
+    this.volumetricClouds = points;
+    console.log(`[VolumetricClouds] ${points.length} pts for ${city.name}`);
   }
 
   // ── Global 2D cloud dots from weather grid ──────────────────────────
@@ -520,6 +625,44 @@ export class DeckLayers {
         opacity: 0.8,
         pickable: false,
       }));
+    }
+
+    // ── Volumetric 3D clouds — city focus (PointCloudLayer) ──────────
+    if (this.cloudVisible && this.focusedCity && this.volumetricClouds.length > 0) {
+      const bandConfigs = [
+        { pointSize: 300, opacity: 0.70 },
+        { pointSize: 450, opacity: 0.60 },
+        { pointSize: 600, opacity: 0.75 },
+        { pointSize: 500, opacity: 0.45 },
+        { pointSize: 700, opacity: 0.35 },
+        { pointSize: 800, opacity: 0.20 },
+        { pointSize: 1000, opacity: 0.12 },
+      ];
+
+      // Group by band for separate layers
+      for (let bi = 0; bi < bandConfigs.length; bi++) {
+        const pts = this.volumetricClouds.filter(p => p.bandIdx === bi);
+        if (pts.length === 0) continue;
+        const cfg = bandConfigs[bi];
+
+        layers.push(new PointCloudLayer({
+          id: `volumetric-clouds-${bi}`,
+          data: pts,
+          getPosition: (d: any) => d.position,
+          getNormal: (d: any) => d.normal,
+          getColor: (d: any) => d.color,
+          pointSize: cfg.pointSize,
+          sizeUnits: 'meters',
+          opacity: cfg.opacity,
+          pickable: false,
+          material: {
+            ambient: 0.6,
+            diffuse: 0.7,
+            shininess: 20,
+            specularColor: [200, 200, 210],
+          },
+        }));
+      }
     }
 
     // ── Wind — denser particles ─────────────────────────────────────

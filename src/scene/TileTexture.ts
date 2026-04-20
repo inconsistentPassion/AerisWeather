@@ -8,7 +8,8 @@
 import * as THREE from 'three';
 
 const TILE_SIZE = 256;
-const TILE_URL = 'https://a.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png';
+// Stadia Maps — CORS-friendly, free for non-commercial use
+const TILE_URL = 'https://tiles.stadiamaps.com/tiles/stamen_toner_background/{z}/{x}/{y}@2x.png';
 
 /**
  * Fetch a single tile as an ImageBitmap.

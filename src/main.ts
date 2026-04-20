@@ -14,7 +14,40 @@ import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
 import { CITIES, searchCities, City } from './weather/CitySearch';
 
-const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
+// Dark raster style — no CORS issues (unlike Carto vector tiles)
+const STYLE_URL: maplibregl.StyleSpecification = {
+  version: 8,
+  name: 'Dark',
+  sources: {
+    'raster-tiles': {
+      type: 'raster',
+      tiles: [
+        'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+      ],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors',
+    },
+  },
+  layers: [
+    {
+      id: 'background',
+      type: 'background',
+      paint: { 'background-color': '#0a0e18' },
+    },
+    {
+      id: 'osm-tiles',
+      type: 'raster',
+      source: 'raster-tiles',
+      paint: {
+        'raster-saturation': -0.9,
+        'raster-brightness-min': 0.04,
+        'raster-brightness-max': 0.25,
+        'raster-contrast': 0.4,
+        'raster-opacity': 0.7,
+      },
+    },
+  ],
+};
 
 async function init() {
   const container = document.getElementById('app')!;
