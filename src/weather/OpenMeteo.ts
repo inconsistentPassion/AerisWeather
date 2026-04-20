@@ -71,7 +71,7 @@ export async function fetchRealWeatherGrid(): Promise<{
     }
 
     console.log(`[OpenMeteo] Quick fetch got ${quickData.length} points — filling grid`);
-    const quickGrid = interpolateToGrid(quickData, [90, 0, -90], [-120, 0, 120], 360, 180);
+    const quickGrid = interpolateToGrid(quickData, [60, 20, -20, -60], [-120, 0, 120], 360, 180);
     cache = { timestamp: Date.now(), grid: quickGrid };
 
     // STEP 2: Background fetch — finer resolution
