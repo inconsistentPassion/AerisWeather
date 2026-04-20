@@ -7,7 +7,6 @@
 
 import type { WeatherLevel, WeatherLayer, WeatherGrid, CloudLayers } from './types';
 import { fetchRealWeatherGrid } from './OpenMeteo';
-import { fetchNASAPowerOpticalDepth } from './NASAPower';
 
 const API_BASE = 'http://localhost:3001';
 
@@ -26,16 +25,14 @@ export class WeatherManager {
     this.setLoading(true);
 
     try {
-      // Wind/temp/humidity from Open-Meteo (clouds handled separately via GFS/POWER)
+      // Open-Meteo provides wind/temp/humidity + cloudFraction
       const realGrid = await Promise.race([
         fetchRealWeatherGrid(),
         new Promise<null>(resolve => setTimeout(() => resolve(null), 60000)),
       ]);
       if (realGrid) {
-        // Strip cloudFraction — clouds come from GFS/POWER, not Open-Meteo
-        (realGrid.fields as { cloudFraction?: Float32Array }).cloudFraction = undefined;
         this.grids.set('surface', realGrid);
-        console.log('[Weather] Using real Open-Meteo data (wind/temp/humidity)');
+        console.log('[Weather] Using real Open-Meteo data');
       } else {
         this.grids.set('surface', await this.fetchGrid('surface', this.currentTime));
         console.log('[Weather] Using backend data');
@@ -89,13 +86,17 @@ export class WeatherManager {
    * Fetch cloud data: GFS backend → NASA POWER → procedural.
    * Populates cloudFraction in the surface grid + cloud layers.
    */
+  /**
+   * Enhance cloud data: try GFS backend for better per-layer data.
+   * If GFS is unavailable, Open-Meteo cloudFraction (already loaded) stays as-is.
+   */
   async fetchCloudData(): Promise<void> {
-    // ── Step 1: Try GFS backend (cloud-layers endpoint) ─────────
+    // Try GFS backend (cloud-layers endpoint) for per-level data
     const available = await this.checkBackend();
     if (available) {
       const gfsResult = await this.fetchCloudLayersFromBackend();
       if (gfsResult) {
-        // Fill cloudFraction from low+medium+high composite
+        // Replace cloudFraction with GFS composite (better than Open-Meteo)
         const grid = this.grids.get('surface');
         if (grid) {
           const cf = new Float32Array(grid.width * grid.height);
@@ -109,36 +110,8 @@ export class WeatherManager {
       }
     }
 
-    // ── Step 2: NASA POWER CLOUD_OD fallback ─────────────────────
-    console.log('[Weather] GFS unavailable, trying POWER CLOUD_OD...');
-    try {
-      const powerData = await fetchNASAPowerOpticalDepth();
-      if (powerData) {
-        // Convert optical depth → rough cloud fraction: τ → 1 - e^(-τ/3)
-        const grid = this.grids.get('surface');
-        if (grid) {
-          const cf = new Float32Array(grid.width * grid.height);
-          for (let i = 0; i < cf.length; i++) {
-            const od = powerData.opticalDepth[i] ?? 0;
-            cf[i] = od > 0 ? Math.min(1, 1 - Math.exp(-od / 3)) : 0;
-          }
-          grid.fields.cloudFraction = cf;
-          console.log('[Weather] Cloud fraction from POWER CLOUD_OD');
-          this.emit('dataLoaded', { level: 'surface', source: 'POWER' });
-        }
-        return;
-      }
-    } catch (e) {
-      console.warn('[Weather] POWER fallback failed:', e);
-    }
-
-    // ── Step 3: Procedural fallback ──────────────────────────────
-    console.log('[Weather] No cloud sources available, using procedural...');
-    const grid = this.grids.get('surface');
-    if (grid) {
-      grid.fields.cloudFraction = this.generateProceduralClouds(grid.width, grid.height);
-      this.emit('dataLoaded', { level: 'surface', source: 'procedural' });
-    }
+    // No GFS — keep Open-Meteo cloudFraction that was already loaded
+    console.log('[Weather] GFS unavailable, keeping Open-Meteo cloud data');
   }
 
   /**
@@ -327,46 +300,4 @@ export class WeatherManager {
     return { width, height, fields: { cloudFraction, humidity, temperature, u, v } };
   }
 
-  /**
-   * Generate procedural cloud fraction grid (last resort fallback).
-   * Realistic-ish ITCZ + mid-latitude storm tracks + diurnal cycle.
-   */
-  private generateProceduralClouds(width: number, height: number): Float32Array {
-    const cf = new Float32Array(width * height);
-    const hour = new Date(this.currentTime).getUTCHours();
-
-    for (let j = 0; j < height; j++) {
-      for (let i = 0; i < width; i++) {
-        const lat = 90 - (j / height) * 180;
-        const lon = (i / width) * 360 - 180;
-
-        // ITCZ
-        const itcz = Math.exp(-lat * lat * 0.003) * 0.5;
-        // Mid-latitude storm tracks
-        const storm = Math.exp(-Math.pow(Math.abs(Math.abs(lat) - 45), 2) * 0.005) * 0.4;
-        // Diurnal convective cycle
-        const diurnal = Math.max(0, Math.sin(((hour - 14) / 24) * Math.PI * 2)) * 0.15;
-
-        // Simple noise
-        const sx = lon * 0.02 + lat * 0.01;
-        const sy = lat * 0.02 - lon * 0.005;
-        const ix = Math.floor(sx), iy = Math.floor(sy);
-        const fx = sx - ix, fy = sy - iy;
-        const sfx = fx * fx * (3 - 2 * fx), sfy = fy * fy * (3 - 2 * fy);
-        const h = (x: number, y: number) => {
-          let h = x * 374761393 + y * 668265263;
-          h = ((h ^ (h >> 13)) * 1274126177) | 0;
-          return (h & 0x7fffffff) / 0x7fffffff * 2 - 1;
-        };
-        const n00 = h(ix, iy), n10 = h(ix + 1, iy);
-        const n01 = h(ix, iy + 1), n11 = h(ix + 1, iy + 1);
-        const noise = (n00 + sfx * (n10 - n00)) + sfy * ((n01 + sfx * (n11 - n01)) - (n00 + sfx * (n10 - n00)));
-
-        cf[j * width + i] = Math.max(0, Math.min(1,
-          itcz + storm + diurnal + noise * 0.1
-        ));
-      }
-    }
-    return cf;
-  }
 }

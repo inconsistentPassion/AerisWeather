@@ -158,12 +158,20 @@ export class DeckLayers {
       this.updateLayers();
     });
 
-    // Periodically rebuild cloud dots in case data arrives late
+    // Periodically rebuild cloud dots if data arrives late (stop after 2 minutes)
+    let rebuildAttempts = 0;
     this.rebuildTimer = setInterval(() => {
-      if (this.cloudDots.length === 0) {
-        console.log('[DeckLayers] Attempting cloud dot rebuild...');
+      if (this.cloudDots.length === 0 && rebuildAttempts < 40) {
+        rebuildAttempts++;
         this.buildGlobalCloudDots();
-        if (this.cloudDots.length > 0) this.updateLayers();
+        if (this.cloudDots.length > 0) {
+          console.log(`[DeckLayers] Cloud dots ready after ${rebuildAttempts} attempts`);
+          this.updateLayers();
+        }
+      }
+      if (rebuildAttempts >= 40 && this.rebuildTimer) {
+        clearInterval(this.rebuildTimer);
+        this.rebuildTimer = null;
       }
     }, 3000);
   }
