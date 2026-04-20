@@ -3,8 +3,8 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre (flat mercator) + deck.gl overlay.
- * Clouds: volumetric-style particles when zoomed into a city.
- * Wind: global particle trails. Rain: humidity-based scatter.
+ * Clouds: volumetric noise-texture particles when zoomed into a city.
+ * Wind: global particle trails. Rain: radar-based scatter.
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -12,6 +12,7 @@ import maplibregl from 'maplibre-gl';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { DeckLayers } from './weather/DeckLayers';
+import { CITIES, searchCities, City } from './weather/CitySearch';
 
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
@@ -53,31 +54,7 @@ async function init() {
   map.addControl(deckLayers.getControl() as any);
   deckLayers.onMapReady(map);
 
-  // ── City data ──────────────────────────────────────────────────────
-  const cities = [
-    { name: 'Tokyo', lon: 139.69, lat: 35.68 },
-    { name: 'London', lon: -0.12, lat: 51.51 },
-    { name: 'New York', lon: -74.01, lat: 40.71 },
-    { name: 'Paris', lon: 2.35, lat: 48.86 },
-    { name: 'Sydney', lon: 151.21, lat: -33.87 },
-    { name: 'Dubai', lon: 55.27, lat: 25.20 },
-    { name: 'Singapore', lon: 103.82, lat: 1.35 },
-    { name: 'São Paulo', lon: -46.63, lat: -23.55 },
-    { name: 'Mumbai', lon: 72.88, lat: 19.08 },
-    { name: 'Cairo', lon: 31.24, lat: 30.04 },
-    { name: 'Beijing', lon: 116.40, lat: 39.90 },
-    { name: 'Moscow', lon: 37.62, lat: 55.76 },
-    { name: 'Los Angeles', lon: -118.24, lat: 34.05 },
-    { name: 'Berlin', lon: 13.40, lat: 52.52 },
-    { name: 'Hong Kong', lon: 114.17, lat: 22.32 },
-    { name: 'Seoul', lon: 126.98, lat: 37.57 },
-    { name: 'Bangkok', lon: 100.50, lat: 13.76 },
-    { name: 'Istanbul', lon: 28.98, lat: 41.01 },
-    { name: 'Mexico City', lon: -99.13, lat: 19.43 },
-    { name: 'Cape Town', lon: 18.42, lat: -33.92 },
-  ];
-
-  let currentCity: typeof cities[0] | null = null;
+  let currentCity: City | null = null;
 
   // ── UI ─────────────────────────────────────────────────────────────
   createUI(uiContainer, weather, {
@@ -93,61 +70,91 @@ async function init() {
     },
   });
 
-  // ── City selector UI ───────────────────────────────────────────────
-  const cityPanel = document.createElement('div');
-  cityPanel.className = 'city-panel';
-  cityPanel.innerHTML = `
-    <div class="city-header">
-      <span class="city-icon">🏙️</span>
-      <select id="city-select" class="city-select">
-        <option value="">🌍 Global View</option>
-        ${cities.map((c, i) => `<option value="${i}">${c.name}</option>`).join('')}
-      </select>
+  // ── City search UI ─────────────────────────────────────────────────
+  const panel = document.createElement('div');
+  panel.className = 'city-panel';
+  panel.innerHTML = `
+    <div class="city-search-row">
+      <span class="city-icon">🔍</span>
+      <input id="city-input" class="city-input" type="text" placeholder="Search city…" autocomplete="off" />
     </div>
+    <div id="city-results" class="city-results"></div>
     <div id="city-info" class="city-info" style="display:none;"></div>
   `;
 
-  const cityStyle = document.createElement('style');
-  cityStyle.textContent = `
+  const style = document.createElement('style');
+  style.textContent = `
     .city-panel {
       position: absolute;
       top: 60px;
       right: 20px;
       z-index: 20;
-      background: rgba(12, 18, 35, 0.9);
+      background: rgba(12, 18, 35, 0.92);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       border: 1px solid rgba(100, 140, 200, 0.15);
       border-radius: 12px;
-      padding: 12px 16px;
-      min-width: 180px;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      padding: 10px 12px;
+      width: 240px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
     }
-    .city-header {
+    .city-search-row {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .city-icon { font-size: 18px; }
-    .city-select {
+    .city-icon { font-size: 14px; opacity: 0.6; }
+    .city-input {
+      flex: 1;
       background: rgba(30, 45, 75, 0.6);
       border: 1px solid rgba(60, 90, 140, 0.2);
       border-radius: 8px;
       color: #c8d6e5;
-      padding: 8px 12px;
+      padding: 8px 10px;
       font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
       outline: none;
-      flex: 1;
-      min-width: 140px;
+      transition: border-color 0.15s;
     }
-    .city-select:hover {
-      border-color: rgba(80, 140, 240, 0.35);
+    .city-input:focus {
+      border-color: rgba(80, 140, 240, 0.5);
+      box-shadow: 0 0 8px rgba(60, 140, 255, 0.15);
     }
-    .city-select option {
-      background: #0c1223;
+    .city-input::placeholder { color: #4a5568; }
+    .city-results {
+      max-height: 280px;
+      overflow-y: auto;
+      margin-top: 6px;
+    }
+    .city-results:empty { display: none; }
+    .city-result {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.1s;
+      font-size: 12px;
+      color: #a0b8d0;
+    }
+    .city-result:hover {
+      background: rgba(55, 110, 190, 0.25);
+      color: #fff;
+    }
+    .city-result-name {
+      font-weight: 600;
       color: #c8d6e5;
+    }
+    .city-result:hover .city-result-name { color: #fff; }
+    .city-result-country {
+      color: #5a6b7d;
+      font-size: 11px;
+      margin-left: auto;
+    }
+    .city-result-coords {
+      color: #3a4858;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
     }
     .city-info {
       margin-top: 8px;
@@ -157,28 +164,47 @@ async function init() {
       color: #6b7b8d;
       line-height: 1.6;
     }
+    .city-info-active {
+      color: #4a9eff;
+    }
+    .city-global-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      color: #6b7b8d;
+      transition: background 0.1s;
+      border-bottom: 1px solid rgba(100, 140, 200, 0.08);
+      margin-bottom: 4px;
+    }
+    .city-global-btn:hover {
+      background: rgba(55, 110, 190, 0.2);
+      color: #a0b8d0;
+    }
   `;
-  document.head.appendChild(cityStyle);
-  uiContainer.appendChild(cityPanel);
+  document.head.appendChild(style);
+  uiContainer.appendChild(panel);
 
-  const citySelect = cityPanel.querySelector('#city-select') as HTMLSelectElement;
-  const cityInfo = cityPanel.querySelector('#city-info') as HTMLElement;
+  const cityInput = panel.querySelector('#city-input') as HTMLInputElement;
+  const cityResults = panel.querySelector('#city-results') as HTMLElement;
+  const cityInfo = panel.querySelector('#city-info') as HTMLElement;
 
-  citySelect.addEventListener('change', () => {
-    const idx = citySelect.value;
-    if (idx === '') {
-      // Global view
-      currentCity = null;
+  function selectCity(city: City | null) {
+    currentCity = city;
+    cityInput.value = city ? city.name : '';
+    cityResults.innerHTML = '';
+    cityInput.blur();
+
+    if (!city) {
       cityInfo.style.display = 'none';
       deckLayers.focusCity(null);
       map.flyTo({ center: [0, 20], zoom: 2, pitch: 0, duration: 1500 });
       return;
     }
 
-    const city = cities[parseInt(idx)];
-    currentCity = city;
-
-    // Zoom into city
     map.flyTo({
       center: [city.lon, city.lat],
       zoom: 10,
@@ -186,16 +212,81 @@ async function init() {
       duration: 2000,
     });
 
-    // Show volumetric clouds for this city
     deckLayers.focusCity(city);
 
     cityInfo.style.display = 'block';
-    cityInfo.textContent = `${city.name}: ${city.lat.toFixed(2)}°, ${city.lon.toFixed(2)}° — zooming in for volumetric clouds…`;
+    cityInfo.className = 'city-info city-info-active';
+    cityInfo.textContent = `☁️ ${city.name} — generating volumetric clouds…`;
 
-    // Update info after zoom
     setTimeout(() => {
-      cityInfo.textContent = `${city.name}: ${city.lat.toFixed(2)}°, ${city.lon.toFixed(2)}° — volumetric cloud layer active`;
-    }, 2500);
+      cityInfo.textContent = `☁️ ${city.name} — volumetric clouds active`;
+    }, 2000);
+  }
+
+  function renderResults(results: City[]) {
+    cityResults.innerHTML = '';
+
+    if (cityInput.value.trim()) {
+      // Global view button
+      const globalBtn = document.createElement('div');
+      globalBtn.className = 'city-global-btn';
+      globalBtn.innerHTML = '🌍 <span>Global View</span>';
+      globalBtn.addEventListener('click', () => selectCity(null));
+      cityResults.appendChild(globalBtn);
+    }
+
+    for (const city of results) {
+      const el = document.createElement('div');
+      el.className = 'city-result';
+      el.innerHTML = `
+        <span class="city-result-name">${city.name}</span>
+        <span class="city-result-coords">${city.lat.toFixed(1)}° ${city.lon.toFixed(1)}°</span>
+        <span class="city-result-country">${city.country}</span>
+      `;
+      el.addEventListener('click', () => selectCity(city));
+      cityResults.appendChild(el);
+    }
+  }
+
+  // Search on input
+  let searchTimeout: ReturnType<typeof setTimeout>;
+  cityInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      const q = cityInput.value.trim();
+      if (!q) {
+        cityResults.innerHTML = '';
+        return;
+      }
+      const results = searchCities(q, 8);
+      renderResults(results);
+    }, 80); // 80ms debounce
+  });
+
+  // Show all popular cities on focus if empty
+  cityInput.addEventListener('focus', () => {
+    if (!cityInput.value.trim()) {
+      renderResults(CITIES.slice(0, 8));
+    }
+  });
+
+  // Close results on click outside
+  document.addEventListener('click', (e) => {
+    if (!panel.contains(e.target as HTMLElement)) {
+      cityResults.innerHTML = '';
+    }
+  });
+
+  // Keyboard: Enter to select first result, Escape to close
+  cityInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const firstResult = cityResults.querySelector('.city-result');
+      if (firstResult) firstResult.dispatchEvent(new Event('click'));
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      cityResults.innerHTML = '';
+      cityInput.blur();
+    }
   });
 
   // ── Load weather ───────────────────────────────────────────────────
@@ -203,9 +294,11 @@ async function init() {
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
   window.addEventListener('keydown', (e) => {
+    // Don't trigger when typing in search
+    if (document.activeElement === cityInput) return;
     switch (e.code) {
       case 'Space': e.preventDefault(); break;
-      case 'KeyR': map.flyTo({ center: [0, 20], zoom: 2, pitch: 0, bearing: 0, duration: 1500 }); break;
+      case 'KeyR': selectCity(null); break;
       case 'Equal': case 'NumpadAdd': map.zoomIn(); break;
       case 'Minus': case 'NumpadSubtract': map.zoomOut(); break;
     }
