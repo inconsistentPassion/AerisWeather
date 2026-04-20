@@ -140,6 +140,13 @@ export class DeckLayers {
       this.updateLayers();
     });
 
+    // Listen for background grid updates
+    window.addEventListener('weather-grid-updated', () => {
+      console.log('[DeckLayers] Grid updated event received — rebuilding');
+      this.buildGlobalCloudDots();
+      this.updateLayers();
+    });
+
     // Periodically rebuild cloud dots in case data arrives late
     this.rebuildTimer = setInterval(() => {
       if (this.cloudDots.length === 0) {
@@ -147,7 +154,7 @@ export class DeckLayers {
         this.buildGlobalCloudDots();
         if (this.cloudDots.length > 0) this.updateLayers();
       }
-    }, 5000);
+    }, 3000);
   }
 
   getControl(): MapboxOverlay { return this.overlay; }

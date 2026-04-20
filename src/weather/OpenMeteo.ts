@@ -1,24 +1,27 @@
 /**
  * OpenMeteo — Real weather data from Open-Meteo API.
  *
- * Fetches wind (u/v), temperature, cloud cover, and humidity
- * from a global grid of sample points, then interpolates to
- * fill a 360×180 grid for the weather globe.
+ * Multi-resolution approach:
+ * 1. INSTANT: Fetch 9 evenly-spaced global points → fill entire grid immediately
+ * 2. BACKGROUND: Fetch finer resolution (30° step) over next ~10 seconds
  *
  * Free, no API key, CORS-enabled.
  */
 
 const API_BASE = 'https://api.open-meteo.com/v1/forecast';
 
-// Grid resolution for sampling (degrees)
-// 20° = 10×18 = 180 points → ~8 API calls of 25 points each
-const SAMPLE_STEP = 20;
-
-// Maximum coordinates per API call
 const MAX_PER_CALL = 25;
-
-// Cache duration (30 minutes — Open-Meteo updates hourly)
 const CACHE_MS = 30 * 60 * 1000;
+
+interface SamplePoint {
+  lat: number;
+  lon: number;
+  windSpeed: number;
+  windDir: number;
+  temp: number;
+  humidity: number;
+  cloudCover: number;
+}
 
 interface CachedGrid {
   timestamp: number;
@@ -52,75 +55,36 @@ export async function fetchRealWeatherGrid(): Promise<{
     cloudFraction: Float32Array;
   };
 } | null> {
-  // Return cache if fresh
   if (cache && Date.now() - cache.timestamp < CACHE_MS) {
     return cache.grid;
   }
 
   try {
-    // Generate sample grid points
-    const lats: number[] = [];
-    const lons: number[] = [];
+    // STEP 1: Fast fetch — 9 key points (3x3 grid) to get SOMETHING visible immediately
+    console.log('[OpenMeteo] Fetching quick global snapshot (9 points)...');
+    const quickPoints = generateQuickPoints();
+    const quickData = await fetchBatch(quickPoints);
 
-    for (let lat = -90; lat <= 90; lat += SAMPLE_STEP) {
-      lats.push(lat);
-    }
-    for (let lon = -180; lon < 180; lon += SAMPLE_STEP) {
-      lons.push(lon);
-    }
-
-    // Flatten into coordinate pairs
-    const points: Array<{ lat: number; lon: number }> = [];
-    for (const lat of lats) {
-      for (const lon of lons) {
-        points.push({ lat, lon });
-      }
-    }
-
-    // Fetch in batches
-    const allData: Array<{
-      lat: number;
-      lon: number;
-      windSpeed: number;
-      windDir: number;
-      temp: number;
-      humidity: number;
-      cloudCover: number;
-    }> = [];
-
-    const totalBatches = Math.ceil(points.length / MAX_PER_CALL);
-    for (let i = 0; i < points.length; i += MAX_PER_CALL) {
-      const batch = points.slice(i, i + MAX_PER_CALL);
-      const batchNum = Math.floor(i / MAX_PER_CALL) + 1;
-
-      // Single attempt — if 429, stop fetching more batches
-      console.log(`[OpenMeteo] Batch ${batchNum}/${totalBatches} (${batch.length} pts)`);
-      const batchData = await fetchBatch(batch);
-
-      if (batchData) {
-        allData.push(...batchData);
-      } else {
-        console.warn(`[OpenMeteo] Batch ${batchNum} failed, stopping fetch`);
-        break; // Don't hammer the API — use whatever we got
-      }
-
-      // 2s between batches to stay well under rate limits
-      if (i + MAX_PER_CALL < points.length) {
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-
-    console.log(`[OpenMeteo] Fetched ${allData.length}/${points.length} points total`);
-    if (allData.length === 0) {
-      console.warn('[OpenMeteo] No data received');
+    if (!quickData || quickData.length === 0) {
+      console.warn('[OpenMeteo] Quick fetch failed entirely');
       return null;
     }
 
-    // Interpolate sparse samples to full 360×180 grid
-    const grid = interpolateToGrid(allData, lats, lons, 360, 180);
+    console.log(`[OpenMeteo] Quick fetch got ${quickData.length} points — filling grid`);
+    const quickGrid = interpolateToGrid(quickData, [90, 0, -90], [-120, 0, 120], 360, 180);
+    cache = { timestamp: Date.now(), grid: quickGrid };
 
-    cache = { timestamp: Date.now(), grid };
-    return grid;
+    // STEP 2: Background fetch — finer resolution
+    fetchBackgroundGrid().then(fineGrid => {
+      if (fineGrid) {
+        cache = { timestamp: Date.now(), grid: fineGrid };
+        // Dispatch custom event so DeckLayers can rebuild
+        window.dispatchEvent(new CustomEvent('weather-grid-updated'));
+        console.log('[OpenMeteo] Fine grid ready — event dispatched');
+      }
+    }).catch(e => console.warn('[OpenMeteo] Background fetch error:', e));
+
+    return quickGrid;
   } catch (e) {
     console.warn('[OpenMeteo] Fetch failed:', e);
     return null;
@@ -128,32 +92,83 @@ export async function fetchRealWeatherGrid(): Promise<{
 }
 
 /**
+ * 9 key points: 3 latitudes × 3 longitudes
+ * Covers equator + mid-latitudes in both hemispheres
+ */
+function generateQuickPoints(): SamplePoint[] {
+  const lats = [60, 20, -20, -60];
+  const lons = [-120, 0, 120];
+  const pts: SamplePoint[] = [];
+  for (const lat of lats) {
+    for (const lon of lons) {
+      pts.push({ lat, lon, windSpeed: 0, windDir: 0, temp: 0, humidity: 0, cloudCover: 0 });
+    }
+  }
+  return pts;
+}
+
+/**
+ * Background: fetch 30° grid (7 lat × 12 lon = 84 points, 4 batches)
+ */
+async function fetchBackgroundGrid(): Promise<CachedGrid['grid'] | null> {
+  const sampleStep = 30;
+  const lats: number[] = [];
+  const lons: number[] = [];
+  for (let lat = -90; lat <= 90; lat += sampleStep) lats.push(lat);
+  for (let lon = -180; lon < 180; lon += sampleStep) lons.push(lon);
+
+  const points: SamplePoint[] = [];
+  for (const lat of lats) {
+    for (const lon of lons) {
+      points.push({ lat, lon, windSpeed: 0, windDir: 0, temp: 0, humidity: 0, cloudCover: 0 });
+    }
+  }
+
+  console.log(`[OpenMeteo] Background fetch: ${points.length} points, ${Math.ceil(points.length / MAX_PER_CALL)} batches`);
+
+  const allData: SamplePoint[] = [];
+  for (let i = 0; i < points.length; i += MAX_PER_CALL) {
+    const batch = points.slice(i, i + MAX_PER_CALL);
+    const batchNum = Math.floor(i / MAX_PER_CALL) + 1;
+
+    const batchData = await fetchBatch(batch);
+    if (batchData) {
+      allData.push(...batchData);
+      console.log(`[OpenMeteo] Batch ${batchNum}: ${batchData.length} pts`);
+    } else {
+      console.warn(`[OpenMeteo] Batch ${batchNum} failed, using partial data (${allData.length} pts so far)`);
+      break;
+    }
+
+    // 1.5s between batches
+    if (i + MAX_PER_CALL < points.length) {
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  if (allData.length < 4) {
+    console.warn('[OpenMeteo] Too few points for fine grid');
+    return null;
+  }
+
+  console.log(`[OpenMeteo] Background complete: ${allData.length}/${points.length} points`);
+  return interpolateToGrid(allData, lats, lons, 360, 180);
+}
+
+/**
  * Fetch a batch of points from Open-Meteo.
+ * Handles CORS, retries, and both array/object response formats.
  */
 async function fetchBatch(
-  points: Array<{ lat: number; lon: number }>
-): Promise<Array<{
-  lat: number;
-  lon: number;
-  windSpeed: number;
-  windDir: number;
-  temp: number;
-  humidity: number;
-  cloudCover: number;
-}> | null> {
+  points: SamplePoint[]
+): Promise<SamplePoint[] | null> {
   const lats = points.map(p => p.lat).join(',');
   const lons = points.map(p => p.lon).join(',');
 
   const params = new URLSearchParams({
     latitude: lats,
     longitude: lons,
-    current: [
-      'wind_speed_10m',
-      'wind_direction_10m',
-      'temperature_2m',
-      'relative_humidity_2m',
-      'cloud_cover',
-    ].join(','),
+    current: 'wind_speed_10m,wind_direction_10m,temperature_2m,relative_humidity_2m,cloud_cover',
     wind_speed_unit: 'ms',
     timezone: 'GMT',
   });
@@ -169,38 +184,24 @@ async function fetchBatch(
     }
 
     const data = await res.json();
-
-    // Open-Meteo returns arrays when multiple coordinates are provided
-    // Handle both single-point (object) and multi-point (array) responses
-    const results: Array<{
-      lat: number;
-      lon: number;
-      windSpeed: number;
-      windDir: number;
-      temp: number;
-      humidity: number;
-      cloudCover: number;
-    }> = [];
+    const results: SamplePoint[] = [];
 
     if (Array.isArray(data)) {
-      // Multi-point response
       for (let i = 0; i < data.length && i < points.length; i++) {
         const d = data[i];
-        const current = d.current;
-        if (!current) continue;
-
+        const c = d.current;
+        if (!c) continue;
         results.push({
           lat: points[i].lat,
           lon: points[i].lon,
-          windSpeed: current.wind_speed_10m ?? 0,
-          windDir: current.wind_direction_10m ?? 0,
-          temp: current.temperature_2m ?? 15,
-          humidity: current.relative_humidity_2m ?? 50,
-          cloudCover: (current.cloud_cover ?? 0) / 100,
+          windSpeed: c.wind_speed_10m ?? 0,
+          windDir: c.wind_direction_10m ?? 0,
+          temp: c.temperature_2m ?? 15,
+          humidity: c.relative_humidity_2m ?? 50,
+          cloudCover: (c.cloud_cover ?? 0) / 100,
         });
       }
-    } else if (data.current) {
-      // Single-point response
+    } else if (data?.current) {
       results.push({
         lat: points[0].lat,
         lon: points[0].lon,
@@ -214,96 +215,68 @@ async function fetchBatch(
 
     return results;
   } catch (e: any) {
-    console.warn('[OpenMeteo] Batch fetch error:', e?.message || e, url.slice(0, 100));
+    console.warn('[OpenMeteo] Fetch error:', e?.message || e);
     return null;
   }
 }
 
 /**
- * Interpolate sparse weather samples to a regular grid.
- * Uses bilinear interpolation from the nearest 4 sample points.
+ * Interpolate sparse samples to regular grid.
  */
 function interpolateToGrid(
-  samples: Array<{
-    lat: number;
-    lon: number;
-    windSpeed: number;
-    windDir: number;
-    temp: number;
-    humidity: number;
-    cloudCover: number;
-  }>,
+  samples: SamplePoint[],
   sampleLats: number[],
   sampleLons: number[],
   width: number,
   height: number
-): {
-  width: number;
-  height: number;
-  fields: {
-    u: Float32Array;
-    v: Float32Array;
-    temperature: Float32Array;
-    humidity: Float32Array;
-    cloudFraction: Float32Array;
-  };
-} {
+): CachedGrid['grid'] {
   const u = new Float32Array(width * height);
   const v = new Float32Array(width * height);
   const temperature = new Float32Array(width * height);
   const humidity = new Float32Array(width * height);
   const cloudFraction = new Float32Array(width * height);
 
-  // Build a lookup from (latIdx, lonIdx) → sample data
-  const sampleMap = new Map<string, typeof samples[0]>();
+  const sampleMap = new Map<string, SamplePoint>();
   for (const s of samples) {
-    // Snap to nearest grid point
-    const latIdx = Math.round((s.lat + 90) / SAMPLE_STEP);
-    const lonIdx = Math.round((s.lon + 180) / SAMPLE_STEP);
+    const latIdx = Math.round((s.lat + 90) / (sampleLats[1] - sampleLats[0]));
+    const lonIdx = Math.round((s.lon + 180) / (sampleLons[1] - sampleLons[0]));
     sampleMap.set(`${latIdx},${lonIdx}`, s);
   }
 
+  const latStep = sampleLats[1] - sampleLats[0];
+  const lonStep = sampleLons[1] - sampleLons[0];
   const numLats = sampleLats.length;
   const numLons = sampleLons.length;
 
   for (let j = 0; j < height; j++) {
-    // Target lat: -90 to 90
     const targetLat = 90 - (j / height) * 180;
-
     for (let i = 0; i < width; i++) {
-      // Target lon: -180 to 180
       const targetLon = (i / width) * 360 - 180;
 
-      // Find surrounding sample indices
-      const latFrac = (targetLat - sampleLats[0]) / SAMPLE_STEP;
-      const lonFrac = (targetLon - sampleLons[0]) / SAMPLE_STEP;
+      const latFrac = (targetLat - sampleLats[0]) / latStep;
+      const lonFrac = (targetLon - sampleLons[0]) / lonStep;
 
       const latIdx0 = Math.floor(latFrac);
       const lonIdx0 = Math.floor(lonFrac);
       const latIdx1 = Math.min(latIdx0 + 1, numLats - 1);
       const lonIdx1 = Math.min(lonIdx0 + 1, numLons - 1);
 
-      const latT = latFrac - latIdx0;
-      const lonT = lonFrac - lonIdx0;
+      const latT = Math.max(0, Math.min(1, latFrac - latIdx0));
+      const lonT = Math.max(0, Math.min(1, lonFrac - lonIdx0));
 
-      // Clamp indices
       const li0 = Math.max(0, Math.min(numLats - 1, latIdx0));
       const li1 = Math.max(0, Math.min(numLats - 1, latIdx1));
       const oi0 = Math.max(0, Math.min(numLons - 1, lonIdx0));
       const oi1 = Math.max(0, Math.min(numLons - 1, lonIdx1));
 
-      // Get 4 corner samples
       const s00 = sampleMap.get(`${li0},${oi0}`);
       const s01 = sampleMap.get(`${li0},${oi1}`);
       const s10 = sampleMap.get(`${li1},${oi0}`);
       const s11 = sampleMap.get(`${li1},${oi1}`);
 
-      // Bilinear interpolation
       const idx = j * width + i;
 
       if (s00 && s01 && s10 && s11) {
-        // Convert wind speed + direction to u/v components
-        // Wind direction: 0° = N, 90° = E (meteorological convention)
         const w00 = windToUV(s00.windSpeed, s00.windDir);
         const w01 = windToUV(s01.windSpeed, s01.windDir);
         const w10 = windToUV(s10.windSpeed, s10.windDir);
@@ -314,14 +287,17 @@ function interpolateToGrid(
         temperature[idx] = bilerp(s00.temp, s01.temp, s10.temp, s11.temp, lonT, latT);
         humidity[idx] = bilerp(s00.humidity, s01.humidity, s10.humidity, s11.humidity, lonT, latT);
         cloudFraction[idx] = bilerp(s00.cloudCover, s01.cloudCover, s10.cloudCover, s11.cloudCover, lonT, latT);
-      } else if (s00) {
-        // Fallback to nearest
-        const w = windToUV(s00.windSpeed, s00.windDir);
-        u[idx] = w.u;
-        v[idx] = w.v;
-        temperature[idx] = s00.temp;
-        humidity[idx] = s00.humidity;
-        cloudFraction[idx] = s00.cloudCover;
+      } else {
+        // Nearest-neighbor fallback
+        const nearest = s00 || s01 || s10 || s11;
+        if (nearest) {
+          const w = windToUV(nearest.windSpeed, nearest.windDir);
+          u[idx] = w.u;
+          v[idx] = w.v;
+          temperature[idx] = nearest.temp;
+          humidity[idx] = nearest.humidity;
+          cloudFraction[idx] = nearest.cloudCover;
+        }
       }
     }
   }
@@ -329,27 +305,11 @@ function interpolateToGrid(
   return { width, height, fields: { u, v, temperature, humidity, cloudFraction } };
 }
 
-/**
- * Convert wind speed (m/s) and direction (degrees, meteorological) to u/v components.
- */
 function windToUV(speed: number, dirDeg: number): { u: number; v: number } {
   const dirRad = (dirDeg * Math.PI) / 180;
-  // Meteorological direction: where wind comes FROM
-  // u = eastward component, v = northward component
-  const u = -speed * Math.sin(dirRad);
-  const v = -speed * Math.cos(dirRad);
-  return { u, v };
+  return { u: -speed * Math.sin(dirRad), v: -speed * Math.cos(dirRad) };
 }
 
-/**
- * Bilinear interpolation between 4 corner values.
- */
-function bilerp(
-  v00: number, v01: number,
-  v10: number, v11: number,
-  tx: number, ty: number
-): number {
-  const top = v00 * (1 - tx) + v01 * tx;
-  const bot = v10 * (1 - tx) + v11 * tx;
-  return top * (1 - ty) + bot * ty;
+function bilerp(v00: number, v01: number, v10: number, v11: number, tx: number, ty: number): number {
+  return (v00 * (1 - tx) + v01 * tx) * (1 - ty) + (v10 * (1 - tx) + v11 * tx) * ty;
 }
