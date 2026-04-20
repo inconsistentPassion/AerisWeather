@@ -1,23 +1,24 @@
 /**
- * WindParticleLayer — Canvas 2D wind streaks on the MapLibre globe.
+ * WindParticleLayer — WebGL-accelerated wind streaks on the MapLibre globe.
  *
- * Uses MapLibre's project() for correct globe-to-screen mapping.
- * Particles advect through the wind field and render as color-batched
- * trail segments.
+ * Eliminates per-frame map.project() calls by projecting particles in the
+ * vertex shader using MapLibre's globe matrix. All 50k particles + trails
+ * render in a single draw call per color bin.
  */
 
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
+const EARTH_RADIUS = 6371000;
 const TOTAL_PARTICLES = 50000;
 const TRAIL_LEN = 5;
 const MAX_AGE = 100;
 const BASE_SPEED = 0.004;
-
 const NUM_BINS = 8;
+
 const BIN_COLORS: [number, number, number, number][] = [
-  [30, 100, 220, 0.45],
-  [55, 180, 210, 0.50],
+  [30, 100, 220, 0.50],
+  [55, 180, 210, 0.55],
   [80, 240, 195, 0.55],
   [140, 255, 120, 0.55],
   [210, 230, 55, 0.55],
@@ -26,88 +27,227 @@ const BIN_COLORS: [number, number, number, number][] = [
   [255, 30, 10, 0.70],
 ];
 
-export class WindParticleLayer {
-  private map: maplibregl.Map;
-  private weather: WeatherManager;
-  private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
-  private animId: number | null = null;
-  private resizeObs: ResizeObserver;
-  private visible = false;
+// ── Shaders ───────────────────────────────────────────────────────────
 
-  // Particle state (SoA)
+const VERT = `
+  attribute vec3 aPos;
+  attribute float aAlpha;
+
+  uniform mat4 uProj;
+  uniform float uLineWidth;
+
+  varying float vAlpha;
+
+  void main() {
+    vAlpha = aAlpha;
+    vec4 p = uProj * vec4(aPos, 1.0);
+    gl_Position = p;
+    gl_PointSize = max(uLineWidth, 1.0);
+  }
+`;
+
+// Line shader for trail segments
+const LINE_VERT = `
+  attribute vec3 aPos0;
+  attribute float aAlpha0;
+  attribute vec3 aPos1;
+  attribute float aAlpha1;
+
+  uniform mat4 uProj;
+  uniform vec2 uResolution;
+
+  varying float vAlpha;
+  varying vec2 vDir;
+
+  void main() {
+    // Each vertex encodes a line segment; we emit both endpoints
+    // Using GL_LINES: vertex 0 = start, vertex 1 = end
+    vec4 p = uProj * vec4(aPos0, 1.0);
+    gl_Position = p;
+    vAlpha = aAlpha0;
+    vDir = vec2(0.0);
+  }
+`;
+
+const FRAG = `
+  precision mediump float;
+  varying float vAlpha;
+  uniform vec4 uColor;
+  void main() {
+    gl_FragColor = vec4(uColor.rgb, uColor.a * vAlpha);
+  }
+`;
+
+// Line fragment shader
+const LINE_FRAG = `
+  precision mediump float;
+  varying float vAlpha;
+
+  void main() {
+    gl_FragColor = vec4(1.0, 1.0, 1.0, vAlpha);
+  }
+`;
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
+  const s = gl.createShader(type)!;
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error('[Wind] Shader error:', gl.getShaderInfoLog(s));
+    gl.deleteShader(s);
+    throw new Error('shader');
+  }
+  return s;
+}
+
+function to3D(lat: number, lon: number): [number, number, number] {
+  const lr = lat * Math.PI / 180;
+  const ln = lon * Math.PI / 180;
+  return [
+    EARTH_RADIUS * Math.cos(lr) * Math.cos(ln),
+    EARTH_RADIUS * Math.cos(lr) * Math.sin(ln),
+    EARTH_RADIUS * Math.sin(lr),
+  ];
+}
+
+// ── Main class ────────────────────────────────────────────────────────
+
+interface BinGL {
+  lineVBO: WebGLBuffer;
+  lineCount: number;
+}
+
+export class WindParticleLayer {
+  private weather: WeatherManager;
+  private map: maplibregl.Map | null = null;
+  private gl: WebGLRenderingContext | null = null;
+  private program: WebGLProgram | null = null;
+  private bins: Map<number, BinGL> = new Map();
+  private uniforms: Record<string, WebGLUniformLocation | null> = {};
+  private visible = false;
+  private animId: number | null = null;
+
+  // Particle state
   private lon = new Float64Array(TOTAL_PARTICLES);
   private lat = new Float64Array(TOTAL_PARTICLES);
   private age = new Float64Array(TOTAL_PARTICLES);
-  private spd = new Float64Array(TOTAL_PARTICLES);
   private trailLon = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailLat = new Float64Array(TOTAL_PARTICLES * TRAIL_LEN);
   private trailHead = new Uint16Array(TOTAL_PARTICLES);
 
-  // Per-bin segment buffers
-  private binSegs: Float64Array[] = [];
+  // Pre-allocated line segment buffers per bin
+  private binSegs: Float32Array[] = [];
   private binSegCount = new Int32Array(NUM_BINS);
 
-  constructor(map: maplibregl.Map, weather: WeatherManager) {
-    this.map = map;
+  constructor(weather: WeatherManager) {
     this.weather = weather;
 
+    // Pre-allocate segment buffers (pos0(3) + alpha0(1) + pos1(3) + alpha1(1) = 8 floats per segment)
+    const maxSegs = 20000;
     for (let b = 0; b < NUM_BINS; b++) {
-      this.binSegs.push(new Float64Array(40000));
+      this.binSegs.push(new Float32Array(maxSegs * 8));
     }
-
-    this.canvas = document.createElement('canvas');
-    Object.assign(this.canvas.style, {
-      position: 'absolute', top: '0', left: '0',
-      width: '100%', height: '100%',
-      pointerEvents: 'none', zIndex: '1',
-    });
-    map.getContainer().appendChild(this.canvas);
-    this.ctx = this.canvas.getContext('2d', { alpha: true })!;
-
-    this.resizeObs = new ResizeObserver(() => this.resize());
-    this.resizeObs.observe(map.getContainer());
-    this.resize();
-
-    map.on('move', () => this.clear());
 
     for (let i = 0; i < TOTAL_PARTICLES; i++) this.spawn(i);
   }
 
-  private resize(): void {
-    const r = this.map.getContainer().getBoundingClientRect();
-    const d = devicePixelRatio;
-    this.canvas.width = r.width * d;
-    this.canvas.height = r.height * d;
-    this.ctx.setTransform(d, 0, 0, d, 0, 0);
-  }
+  getLayer(): maplibregl.CustomLayerInterface {
+    const self = this;
+    return {
+      id: 'wind-lines',
+      type: 'custom',
+      renderingMode: '2d',
 
-  private clear(): void {
-    const d = devicePixelRatio;
-    this.ctx.clearRect(0, 0, this.canvas.width / d, this.canvas.height / d);
+      onAdd(map: maplibregl.Map, gl: WebGLRenderingContext) {
+        self.map = map;
+        self.gl = gl;
+
+        const vs = compileShader(gl, gl.VERTEX_SHADER, VERT);
+        const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
+        self.program = gl.createProgram()!;
+        gl.attachShader(self.program, vs);
+        gl.attachShader(self.program, fs);
+        gl.linkProgram(self.program);
+        if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
+          console.error('[Wind] Link error:', gl.getProgramInfoLog(self.program));
+          return;
+        }
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+
+        self.uniforms.uProj = gl.getUniformLocation(self.program, 'uProj');
+        self.uniforms.uLineWidth = gl.getUniformLocation(self.program, 'uLineWidth');
+        self.uniforms.uColor = gl.getUniformLocation(self.program, 'uColor');
+
+        for (let b = 0; b < NUM_BINS; b++) {
+          self.bins.set(b, { lineVBO: gl.createBuffer()!, lineCount: 0 });
+        }
+
+        console.log('[Wind] WebGL layer ready');
+      },
+
+      render(gl: WebGLRenderingContext, args: any) {
+        if (!self.program || !self.visible) return;
+        const mat = args?.defaultProjectionData?.mainMatrix;
+        if (!mat || mat.length !== 16) return;
+
+        // Advect + build geometry
+        self.tick();
+
+        // Upload + draw
+        gl.useProgram(self.program);
+        gl.uniformMatrix4fv(self.uniforms.uProj, false, new Float32Array(mat));
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(false);
+
+        const aPos = gl.getAttribLocation(self.program, 'aPos');
+        const aAlpha = gl.getAttribLocation(self.program, 'aAlpha');
+
+        for (let b = 0; b < NUM_BINS; b++) {
+          const binGL = self.bins.get(b)!;
+          if (binGL.lineCount === 0) continue;
+
+          const [r, g, bl, alphaBase] = BIN_COLORS[b];
+          gl.uniform4f(self.uniforms.uColor, r / 255, g / 255, bl / 255, 1.0);
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, binGL.lineVBO);
+
+          const stride = 16; // 4 floats: x, y, z, alpha
+          gl.enableVertexAttribArray(aPos);
+          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+          gl.enableVertexAttribArray(aAlpha);
+          gl.vertexAttribPointer(aAlpha, 1, gl.FLOAT, false, stride, 12);
+
+          gl.drawArrays(gl.LINES, 0, binGL.lineCount);
+        }
+
+        gl.disableVertexAttribArray(aPos);
+        gl.disableVertexAttribArray(aAlpha);
+        gl.depthMask(true);
+      },
+
+      onRemove(_map: maplibregl.Map, gl: WebGLRenderingContext) {
+        if (self.animId) cancelAnimationFrame(self.animId);
+        for (const [, bg] of self.bins) gl.deleteBuffer(bg.lineVBO);
+        if (self.program) gl.deleteProgram(self.program);
+        self.bins.clear();
+      },
+    };
   }
 
   private spawn(i: number): void {
     this.lon[i] = (Math.random() - 0.5) * 360;
     this.lat[i] = (Math.random() - 0.5) * 180;
     this.age[i] = Math.random() * MAX_AGE * 0.3;
-    this.spd[i] = 0;
     this.trailHead[i] = 0;
     const b = i * TRAIL_LEN;
     for (let t = 0; t < TRAIL_LEN; t++) {
       this.trailLon[b + t] = this.lon[i];
       this.trailLat[b + t] = this.lat[i];
     }
-  }
-
-  private isFrontSide(lon: number, lat: number): boolean {
-    const c = this.map.getCenter();
-    const cLat = c.lat * Math.PI / 180;
-    const cLon = c.lng * Math.PI / 180;
-    const pLat = lat * Math.PI / 180;
-    const pLon = lon * Math.PI / 180;
-    return Math.sin(cLat) * Math.sin(pLat) +
-           Math.cos(cLat) * Math.cos(pLat) * Math.cos(pLon - cLon) > 0.05;
   }
 
   private sampleWind(u: Float32Array, v: Float32Array, lon: number, lat: number) {
@@ -124,31 +264,20 @@ export class WindParticleLayer {
     return { u: uVal, v: vVal, speed: Math.sqrt(uVal * uVal + vVal * vVal) };
   }
 
-  private frame(): void {
-    if (!this.visible || !this.weather.isLayerActive('wind')) {
-      this.clear();
-      this.animId = requestAnimationFrame(() => this.frame());
+  /**
+   * One simulation + geometry build tick. Called each render frame.
+   * NO map.project() calls — all projection done in vertex shader.
+   */
+  private tick(): void {
+    const wf = this.weather.getWindField('surface');
+    if (!wf) {
+      // Clear all bins
+      for (let b = 0; b < NUM_BINS; b++) this.binSegCount[b] = 0;
+      this.flush();
       return;
     }
 
-    const wf = this.weather.getWindField('surface');
-    if (!wf) { this.animId = requestAnimationFrame(() => this.frame()); return; }
-
     const { u, v } = wf;
-
-    // Fade
-    const dpr = devicePixelRatio;
-    const cw = this.canvas.width / dpr, ch = this.canvas.height / dpr;
-    this.ctx.globalCompositeOperation = 'destination-in';
-    this.ctx.fillStyle = 'rgba(0,0,0,0.94)';
-    this.ctx.fillRect(0, 0, cw, ch);
-    this.ctx.globalCompositeOperation = 'source-over';
-
-    const bounds = this.map.getBounds();
-    const vpW = bounds.getWest(), vpE = bounds.getEast();
-    const vpS = bounds.getSouth(), vpN = bounds.getNorth();
-    const crossesDateLine = vpW > vpE;
-
     this.binSegCount.fill(0);
 
     for (let i = 0; i < TOTAL_PARTICLES; i++) {
@@ -156,7 +285,6 @@ export class WindParticleLayer {
       if (this.age[i] >= MAX_AGE) { this.spawn(i); continue; }
 
       const wind = this.sampleWind(u, v, this.lon[i], this.lat[i]);
-      this.spd[i] = wind.speed;
 
       if (wind.speed >= 0.3) {
         const cosLat = Math.max(0.3, Math.cos(this.lat[i] * Math.PI / 180));
@@ -176,86 +304,68 @@ export class WindParticleLayer {
 
       if (wind.speed < 0.3 || this.age[i] < TRAIL_LEN) continue;
 
-      let inView: boolean;
-      if (crossesDateLine) inView = (this.lon[i] >= vpW - 2) || (this.lon[i] <= vpE + 2);
-      else inView = this.lon[i] >= vpW - 2 && this.lon[i] <= vpE + 2;
-      if (!inView || this.lat[i] < vpS - 2 || this.lat[i] > vpN + 2) continue;
-      if (!this.isFrontSide(this.lon[i], this.lat[i])) continue;
-
-      // Project trail to screen
-      const px = new Float64Array(TRAIL_LEN);
-      const py = new Float64Array(TRAIL_LEN);
-      for (let t = 0; t < TRAIL_LEN; t++) {
-        const slot = (h + t) % TRAIL_LEN;
-        try {
-          const pt = this.map.project([this.trailLon[tb + slot], this.trailLat[tb + slot]] as any);
-          px[t] = pt.x; py[t] = pt.y;
-        } catch { px[t] = -9999; py[t] = -9999; }
-      }
-
       const bin = Math.min(NUM_BINS - 1, Math.floor((wind.speed / 25) * NUM_BINS));
+      const alpha = 0.3 + (bin / NUM_BINS) * 0.5;
       const segs = this.binSegs[bin];
       let sc = this.binSegCount[bin];
+      const maxSegs = segs.length / 8;
 
-      for (let t = 0; t < TRAIL_LEN - 1; t++) {
-        const dx = px[t + 1] - px[t], dy = py[t + 1] - py[t];
-        if (dx * dx + dy * dy > 200 * 200) continue;
-        if (px[t] < -999 || px[t+1] < -999) continue;
-        segs[sc++] = px[t]; segs[sc++] = py[t];
-        segs[sc++] = px[t + 1]; segs[sc++] = py[t + 1];
+      // Build trail segments as 3D globe positions
+      for (let t = 0; t < TRAIL_LEN - 1 && sc < maxSegs; t++) {
+        const s0 = (h + t) % TRAIL_LEN;
+        const s1 = (h + t + 1) % TRAIL_LEN;
+        const lon0 = this.trailLon[tb + s0], lat0 = this.trailLat[tb + s0];
+        const lon1 = this.trailLon[tb + s1], lat1 = this.trailLat[tb + s1];
+
+        // Skip date-line wrapping
+        if (Math.abs(lon1 - lon0) > 10) continue;
+
+        const [x0, y0, z0] = to3D(lat0, lon0);
+        const [x1, y1, z1] = to3D(lat1, lon1);
+
+        // Trail alpha fades toward tail
+        const trailAlpha = alpha * (t / TRAIL_LEN);
+
+        const off = sc * 8;
+        segs[off] = x0; segs[off+1] = y0; segs[off+2] = z0; segs[off+3] = trailAlpha;
+        segs[off+4] = x1; segs[off+5] = y1; segs[off+6] = z1; segs[off+7] = trailAlpha * 0.9;
+        sc++;
       }
-      segs[sc++] = px[TRAIL_LEN - 1]; segs[sc++] = py[TRAIL_LEN - 1];
-      segs[sc++] = px[TRAIL_LEN - 1]; segs[sc++] = py[TRAIL_LEN - 1];
+
       this.binSegCount[bin] = sc;
     }
 
-    // Draw
-    this.ctx.lineCap = 'round';
-    this.ctx.lineJoin = 'round';
+    this.flush();
+  }
+
+  private flush(): void {
+    const gl = this.gl;
+    if (!gl) return;
+
     for (let b = 0; b < NUM_BINS; b++) {
+      const binGL = this.bins.get(b)!;
       const count = this.binSegCount[b];
-      if (count === 0) continue;
       const segs = this.binSegs[b];
-      const [r, g, bl, alphaBase] = BIN_COLORS[b];
 
-      this.ctx.beginPath();
-      for (let j = 0; j < count; j += 4) {
-        this.ctx.moveTo(segs[j], segs[j + 1]);
-        this.ctx.lineTo(segs[j + 2], segs[j + 3]);
+      if (count > 0) {
+        // Upload segment data (each segment = 2 endpoints × 4 floats)
+        // For GL_LINES, we need flat array of all endpoints
+        const lineData = segs.subarray(0, count * 8);
+        gl.bindBuffer(gl.ARRAY_BUFFER, binGL.lineVBO);
+        gl.bufferData(gl.ARRAY_BUFFER, lineData, gl.DYNAMIC_DRAW);
+        binGL.lineCount = count * 2; // 2 vertices per segment
+      } else {
+        binGL.lineCount = 0;
       }
-      this.ctx.lineWidth = 0.6 + b * 0.15;
-      this.ctx.strokeStyle = `rgba(${r},${g},${bl},${alphaBase * 0.6})`;
-      this.ctx.stroke();
-
-      // Head dots
-      this.ctx.beginPath();
-      for (let j = count - 4; j >= 0; j -= 4) {
-        this.ctx.moveTo(segs[j], segs[j + 1]);
-        this.ctx.lineTo(segs[j + 2], segs[j + 3]);
-      }
-      this.ctx.lineWidth = 1.2 + b * 0.25;
-      this.ctx.strokeStyle = `rgba(${r},${g},${bl},${alphaBase})`;
-      this.ctx.stroke();
     }
-
-    this.animId = requestAnimationFrame(() => this.frame());
   }
 
   setVisible(v: boolean): void {
     this.visible = v;
-    this.canvas.style.display = v ? '' : 'none';
-    if (v) {
-      this.clear();
-      if (this.animId === null) this.frame();
-    } else {
-      if (this.animId !== null) { cancelAnimationFrame(this.animId); this.animId = null; }
-      this.clear();
-    }
+    this.map?.triggerRepaint();
   }
 
   destroy(): void {
-    if (this.animId !== null) cancelAnimationFrame(this.animId);
-    this.resizeObs.disconnect();
-    this.canvas.remove();
+    this.visible = false;
   }
 }

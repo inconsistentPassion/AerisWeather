@@ -3,8 +3,8 @@
  * "Windy meets MSFS, but in the browser."
  *
  * MapLibre GL JS  → globe, tiles, zoom, camera
- * Custom WebGL    → 3D cloud points (globe-native)
- * Canvas 2D       → wind streaks, rain drops
+ * Custom WebGL    → clouds (3D points), wind (lines), rain (lines)
+ * All GPU-rendered, zero map.project() calls per frame.
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -77,9 +77,7 @@ async function init() {
     });
     map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 });
     map.addLayer({
-      id: 'hillshade-layer',
-      type: 'hillshade',
-      source: 'terrain-dem',
+      id: 'hillshade-layer', type: 'hillshade', source: 'terrain-dem',
       paint: {
         'hillshade-illumination-direction': 315,
         'hillshade-exaggeration': 0.6,
@@ -90,26 +88,27 @@ async function init() {
     });
   } catch (e) { console.warn('[Terrain] Failed:', e); }
 
-  // Suppress non-critical errors
   map.on('error', (e) => {
     const msg = e.error?.message || '';
     if (msg.includes('rainviewer') || msg.includes('404') || msg.includes('not supported')) return;
     console.error('MapLibre error:', e);
   });
 
-  // ── Cloud layer (custom WebGL, globe-native) ───────────────────────
+  // ── Custom WebGL layers (all GPU-accelerated) ──────────────────────
   const cloudLayer = new CloudPointLayer(weather);
-  map.addLayer(cloudLayer.getLayer());
-  cloudLayer.setVisible(true);
-
-  // ── Wind + Rain (canvas 2D overlays) ───────────────────────────────
-  const windParticles = new WindParticleLayer(map, weather);
-  const radarLayer = new RadarLayer(map, weather);
+  const windLayer = new WindParticleLayer(weather);
   const rainEffect = new RainEffect(map);
+  const radarLayer = new RadarLayer(map, weather);
 
-  radarLayer.setVisible(true);
+  // Add layers in order (clouds behind, rain/wind in front)
+  map.addLayer(cloudLayer.getLayer());
+  map.addLayer(rainEffect.getLayer());
+  map.addLayer(windLayer.getLayer());
+
+  cloudLayer.setVisible(true);
   rainEffect.setVisible(true);
-  windParticles.setVisible(true);
+  windLayer.setVisible(true);
+  radarLayer.setVisible(true);
 
   // ── UI ─────────────────────────────────────────────────────────────
   createUI(uiContainer, weather, {
@@ -118,8 +117,8 @@ async function init() {
     onLayerToggle: (layer, active) => {
       weather.toggleLayer(layer, active);
       switch (layer) {
-        case 'wind': windParticles.setVisible(active); break;
-        case 'radar': radarLayer.setVisible(active); rainEffect.setVisible(active); break;
+        case 'wind': windLayer.setVisible(active); map.triggerRepaint(); break;
+        case 'radar': radarLayer.setVisible(active); rainEffect.setVisible(active); map.triggerRepaint(); break;
         case 'clouds': cloudLayer.setVisible(active); map.triggerRepaint(); break;
       }
     },
@@ -129,10 +128,8 @@ async function init() {
     },
   });
 
-  // ── Load data ──────────────────────────────────────────────────────
   weather.loadInitial().catch(e => console.warn('[Weather] load failed:', e));
 
-  // ── Keyboard shortcuts ─────────────────────────────────────────────
   window.addEventListener('keydown', (e) => {
     switch (e.code) {
       case 'Space': e.preventDefault(); break;
