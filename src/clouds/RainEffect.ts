@@ -1,33 +1,60 @@
 /**
- * RainEffect — WebGL rain streaks on the MapLibre globe.
+ * RainEffect — Vertical rain streaks driven by real radar data.
  *
- * Projects rain drops in the vertex shader (no map.project() calls).
- * Spawns drops in precipitation cells from RainViewer radar data.
+ * Rain drops spawn at cloud base altitude and fall vertically
+ * (straight down in elevation) to the ground — like Xiaomi HyperOS
+ * weather app style. Driven by RainViewer radar precipitation data.
  */
 
 import maplibregl from 'maplibre-gl';
 
-const MAX_DROPS = 5000;
-const SPAWN_PER_FRAME = 120;
+// ── Configuration ─────────────────────────────────────────────────────
+
+const MAX_DROPS = 6000;
+const SPAWN_PER_FRAME = 150;
 const TILE_PX = 256;
 const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 const REFRESH_INTERVAL = 10 * 60 * 1000;
 
+/** Cloud base altitude range (meters) — where rain spawns */
+const CLOUD_BASE_MIN = 800;
+const CLOUD_BASE_MAX = 3000;
+
+/** Ground level (meters) — where rain despawns */
+const GROUND_LEVEL = 5;
+
 const NUM_BINS = 5;
 const BIN_COLORS: [number, number, number, number][] = [
-  [90, 140, 210, 0.20],
-  [130, 180, 235, 0.30],
-  [170, 215, 255, 0.42],
-  [210, 235, 255, 0.55],
-  [245, 250, 255, 0.68],
+  [90, 140, 210, 0.25],
+  [130, 180, 235, 0.35],
+  [170, 215, 255, 0.48],
+  [210, 235, 255, 0.60],
+  [245, 250, 255, 0.72],
 ];
 
-// ── Shader ────────────────────────────────────────────────────────────
+// ── Shaders ───────────────────────────────────────────────────────────
 
-// Vertex shader — uses MapLibre's projectTileWithElevation for correct globe projection
 const VERT_BODY = `
-  attribute vec2 aMercator;   // mercator x,y [0,1]
-  attribute float aElevation; // elevation above surface in meters
+  attribute vec2 aMercator;     // mercator x,y [0,1] — fixed position
+  attribute float aTopElev;     // top of rain streak (meters)
+  attribute float aBotElev;     // bottom of rain streak (meters)
+  attribute float aAlpha;       // fade factor
+
+  varying float vAlpha;
+
+  void main() {
+    vAlpha = aAlpha;
+
+    // Use the top elevation for projection (the line goes from top to bottom)
+    gl_Position = projectTileWithElevation(aMercator, aTopElev);
+    gl_PointSize = 1.5;
+  }
+`;
+
+// Line vertex shader — each drop is a vertical line segment
+const LINE_VERT = `
+  attribute vec2 aMercator;
+  attribute float aElevation;   // top or bottom elevation
   attribute float aAlpha;
 
   varying float vAlpha;
@@ -35,7 +62,6 @@ const VERT_BODY = `
   void main() {
     vAlpha = aAlpha;
     gl_Position = projectTileWithElevation(aMercator, aElevation);
-    gl_PointSize = 1.5;
   }
 `;
 
@@ -78,16 +104,41 @@ function pixelToLat(ty: number, py: number, z: number) {
   return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
 }
 
-// ── Main class ────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────
 
-interface PrecipCell { lon: number; lat: number; halfLon: number; halfLat: number; intensity: number; }
-interface Drop { lon: number; lat: number; fall: number; speed: number; length: number; intensity: number; age: number; maxAge: number; }
+interface PrecipCell {
+  lon: number;
+  lat: number;
+  halfLon: number;
+  halfLat: number;
+  intensity: number;
+}
+
+interface Drop {
+  lon: number;
+  lat: number;
+  /** Current elevation (starts at cloudBase, falls to ground) */
+  elev: number;
+  /** Cloud base where this drop spawned */
+  cloudBase: number;
+  /** Fall speed in meters per frame */
+  fallSpeed: number;
+  /** Streak length in meters */
+  streakLength: number;
+  intensity: number;
+  age: number;
+  maxAge: number;
+  /** Wind drift — small horizontal offset that accumulates */
+  driftLon: number;
+  driftLat: number;
+}
 
 interface BinGL { vbo: WebGLBuffer; count: number; }
 
+// ── Main class ────────────────────────────────────────────────────────
+
 export class RainEffect {
   private map: maplibregl.Map;
-  private weather_active = true;
   private gl: WebGLRenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private bins: Map<number, BinGL> = new Map();
@@ -114,11 +165,9 @@ export class RainEffect {
 
       onAdd(map: maplibregl.Map, gl: WebGLRenderingContext) {
         self.gl = gl;
-
         for (let b = 0; b < NUM_BINS; b++) {
           self.bins.set(b, { vbo: gl.createBuffer()!, count: 0 });
         }
-
         console.log('[Rain] WebGL layer added');
       },
 
@@ -130,7 +179,7 @@ export class RainEffect {
           self.shaderPrelude = args.shaderData.vertexShaderPrelude || '';
           self.shaderDefine = args.shaderData.define || '';
           const prelude = `${self.shaderPrelude}\n${self.shaderDefine}`;
-          const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
+          const vs = compileShader(gl, gl.VERTEX_SHADER, LINE_VERT, prelude);
           const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
           self.program = gl.createProgram()!;
           gl.attachShader(self.program, vs);
@@ -170,6 +219,7 @@ export class RainEffect {
           gl.uniform4f(self.uniforms.uColor, r / 255, g / 255, bl / 255, 1.0);
 
           gl.bindBuffer(gl.ARRAY_BUFFER, bg.vbo);
+          // Each vertex: mercator(2) + elevation(1) + alpha(1) = 4 floats = 16 bytes
           const stride = 16;
           gl.enableVertexAttribArray(aMercator);
           gl.vertexAttribPointer(aMercator, 2, gl.FLOAT, false, stride, 0);
@@ -194,6 +244,8 @@ export class RainEffect {
       },
     };
   }
+
+  // ── Radar data ──────────────────────────────────────────────────────
 
   private async loadRadar(): Promise<void> {
     try {
@@ -227,13 +279,18 @@ export class RainEffect {
             for (let py = 0; py < TILE_PX; py += STRIDE) {
               for (let pxx = 0; pxx < TILE_PX; pxx += STRIDE) {
                 const i = (py * TILE_PX + pxx) * 4;
-                const lum = (0.299 * px[i] + 0.587 * px[i+1] + 0.114 * px[i+2]) / 255;
-                const intensity = lum * (px[i+3] / 255);
+                const lum = (0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]) / 255;
+                const intensity = lum * (px[i + 3] / 255);
                 if (intensity > 0.08) {
                   const lon = pixelToLon(tx, pxx + STRIDE / 2, zoom);
                   const lat = pixelToLat(ty, py + STRIDE / 2, zoom);
                   const cs = (360 / (1 << zoom)) / TILE_PX * STRIDE;
-                  cells.push({ lon, lat, halfLon: cs, halfLat: cs * 0.5, intensity: Math.min(1, intensity * 1.5) });
+                  cells.push({
+                    lon, lat,
+                    halfLon: cs,
+                    halfLat: cs * 0.5,
+                    intensity: Math.min(1, intensity * 1.5),
+                  });
                 }
               }
             }
@@ -251,32 +308,41 @@ export class RainEffect {
     }
   }
 
+  // ── Simulation tick ─────────────────────────────────────────────────
+
   private tick(): void {
     if (!this.visible) {
       for (let b = 0; b < NUM_BINS; b++) this.bins.get(b)!.count = 0;
       return;
     }
 
-    // Spawn
+    // Spawn new drops
     if (this.cells.length > 0) {
       for (let i = 0; i < SPAWN_PER_FRAME; i++) {
         const cell = this.cells[Math.floor(Math.random() * this.cells.length)];
         if (Math.random() > cell.intensity) continue;
+
+        // Cloud base varies with intensity — heavier rain comes from lower (thicker) clouds
+        const cloudBase = CLOUD_BASE_MIN + (1 - cell.intensity) * (CLOUD_BASE_MAX - CLOUD_BASE_MIN);
+
         this.drops.push({
           lon: cell.lon + (Math.random() - 0.5) * cell.halfLon * 2,
           lat: cell.lat + (Math.random() - 0.5) * cell.halfLat * 2,
-          fall: Math.random() * 0.3,
-          speed: 0.015 + Math.random() * 0.018 + cell.intensity * 0.008,
-          length: 0.4 + Math.random() * 0.5 + cell.intensity * 0.3,
+          elev: cloudBase,
+          cloudBase,
+          fallSpeed: 40 + Math.random() * 60 + cell.intensity * 30, // meters per frame
+          streakLength: 100 + Math.random() * 200 + cell.intensity * 150,
           intensity: cell.intensity,
           age: 0,
-          maxAge: 50 + Math.floor(Math.random() * 50),
+          maxAge: 60 + Math.floor(Math.random() * 60),
+          driftLon: (Math.random() - 0.5) * 0.001,
+          driftLat: (Math.random() - 0.5) * 0.0005,
         });
       }
       if (this.drops.length > MAX_DROPS) this.drops.splice(0, this.drops.length - MAX_DROPS);
     }
 
-    // Build geometry per bin
+    // Build geometry per bin — each drop = 1 line segment = 2 vertices
     const segsByBin: Float32Array[] = [];
     const countByBin = new Int32Array(NUM_BINS);
     const maxSegs = Math.ceil(MAX_DROPS / NUM_BINS);
@@ -284,41 +350,57 @@ export class RainEffect {
 
     for (let i = this.drops.length - 1; i >= 0; i--) {
       const d = this.drops[i];
-      d.age++; d.fall += d.speed;
-      if (d.fall >= 1 || d.age >= d.maxAge) {
+      d.age++;
+      d.elev -= d.fallSpeed;
+
+      // Accumulate wind drift
+      d.lon += d.driftLon;
+      d.lat += d.driftLat;
+
+      // Drop reaches ground → remove
+      if (d.elev <= GROUND_LEVEL || d.age >= d.maxAge) {
         this.drops[i] = this.drops[this.drops.length - 1];
         this.drops.pop();
         continue;
       }
 
-      // Rain drop as a short line on globe surface (lat offset = falling motion)
-      const dropOffset = d.length * 0.2;
-      const tailLat = d.lat - dropOffset * (d.fall - 0.5);
-      const headLat = d.lat - dropOffset * (d.fall + 0.5);
-      if (Math.abs(headLat) > 90 || Math.abs(tailLat) > 90) continue;
+      // Skip if out of bounds
+      if (Math.abs(d.lat) > 85) continue;
 
-      const m0 = toMercator(tailLat, d.lon);
-      const m1 = toMercator(headLat, d.lon);
-      // Elevation: slight offset above surface for rain visual
-      const elev0 = 100 + d.fall * 2000;
-      const elev1 = 100 + (d.fall + 0.1) * 2000;
+      // Streak: from current elevation (bottom) up to streak length (top)
+      const botElev = d.elev;
+      const topElev = d.elev + d.streakLength;
+
+      // Same mercator position for both ends — purely vertical streak
+      const m = toMercator(d.lat, d.lon);
+
+      // Age-based fade: fade in at spawn, fade out near ground
+      const ageFade = d.age < 6 ? d.age / 6 : 1.0;
+      const groundFade = botElev < 200 ? botElev / 200 : 1.0;
+      const alpha = Math.max(0, ageFade * groundFade);
 
       const bin = Math.min(NUM_BINS - 1, Math.floor(d.intensity * NUM_BINS));
-      const ageFade = d.age < 8 ? d.age / 8 : d.fall > 0.8 ? (1 - d.fall) / 0.2 : 1;
-      const alpha = Math.max(0, ageFade);
-
       const segs = segsByBin[bin];
       const sc = countByBin[bin];
       const maxS = segs.length / 8;
       if (sc >= maxS) continue;
 
       const off = sc * 8;
-      segs[off] = m0.x; segs[off+1] = m0.y; segs[off+2] = elev0; segs[off+3] = alpha;
-      segs[off+4] = m1.x; segs[off+5] = m1.y; segs[off+6] = elev1; segs[off+7] = alpha * 0.8;
+      // Top vertex
+      segs[off]     = m.x;
+      segs[off + 1] = m.y;
+      segs[off + 2] = topElev;
+      segs[off + 3] = alpha * 0.6; // top fades more
+      // Bottom vertex
+      segs[off + 4] = m.x;
+      segs[off + 5] = m.y;
+      segs[off + 6] = botElev;
+      segs[off + 7] = alpha;
+
       countByBin[bin] = sc + 1;
     }
 
-    // Upload
+    // Upload to GPU
     const gl = this.gl;
     if (!gl) return;
 
@@ -328,7 +410,7 @@ export class RainEffect {
       if (count > 0) {
         gl.bindBuffer(gl.ARRAY_BUFFER, bg.vbo);
         gl.bufferData(gl.ARRAY_BUFFER, segsByBin[b].subarray(0, count * 8), gl.DYNAMIC_DRAW);
-        bg.count = count * 2; // GL_LINES vertices
+        bg.count = count * 2; // GL_LINES: 2 vertices per segment
       } else {
         bg.count = 0;
       }

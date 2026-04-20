@@ -1,9 +1,9 @@
 /**
  * DeckLayers — Weather visualization using deck.gl layers.
  *
- * Clouds: PointCloudLayer (3D lit spheres, not flat circles)
+ * Clouds: PointCloudLayer (3D lit spheres, data-driven density + storm shaping)
  * Wind:   PathLayer (multi-segment particle trails)
- * Rain:   ScatterplotLayer (small flat drops)
+ * Rain:   PathLayer (vertical elevation-based streaks from cloud to ground)
  *
  * References:
  * - deck.gl/examples/point-cloud → PointCloudLayer with sizeUnits:'meters' + material
@@ -15,7 +15,7 @@ import { MapboxOverlay } from '@deck.gl/mapbox';
 import { PointCloudLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
 import type { WeatherManager } from './WeatherManager';
 import { loadRadarCells, getCachedRadarCells } from './RadarData';
-import { generateCloudNoise, generateHeightNoise } from './CloudNoise';
+import { generateCloudNoise, generateHeightNoise, generateStormNoise } from './CloudNoise';
 import type maplibregl from 'maplibre-gl';
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ import type maplibregl from 'maplibre-gl';
 interface CloudPoint {
   position: [number, number, number]; // lon, lat, altitude(m)
   normal: [number, number, number];   // surface normal for lighting
-  color: [number, number, number];
+  color: [number, number, number, number]; // rgba
 }
 
 interface WindTrail {
@@ -31,10 +31,9 @@ interface WindTrail {
   color: [number, number, number, number];
 }
 
-interface RainDrop {
-  position: [number, number, number];
-  color: [number, number, number];
-  radius: number;
+interface RainStreak {
+  path: [number, number, number][]; // top → bottom (same lon/lat, descending elev)
+  color: [number, number, number, number];
 }
 
 interface City {
@@ -60,23 +59,65 @@ const WIND_COLORS: [number, number, number, number][] = [
   [255, 30, 10, 220],
 ];
 
-const RAIN_COLORS: [number, number, number][] = [
-  [90, 140, 210],
-  [130, 180, 235],
-  [170, 215, 255],
-  [210, 235, 255],
-  [245, 250, 255],
+const RAIN_COLORS: [number, number, number, number][] = [
+  [90, 140, 210, 160],
+  [130, 180, 235, 190],
+  [170, 215, 255, 210],
+  [210, 235, 255, 230],
+  [245, 250, 255, 240],
 ];
 
-// Cloud bands: altitude, point size (meters), color tint, opacity
-const CLOUD_BANDS = [
-  { alt: 800,   spread: 500,  pointSize: 800,  color: [248, 248, 255] as [number, number, number], opacity: 0.65 },
-  { alt: 1600,  spread: 700,  pointSize: 1200, color: [240, 242, 252] as [number, number, number], opacity: 0.50 },
-  { alt: 3000,  spread: 1000, pointSize: 1800, color: [232, 236, 248] as [number, number, number], opacity: 0.40 },
-  { alt: 5000,  spread: 1400, pointSize: 2500, color: [222, 228, 245] as [number, number, number], opacity: 0.30 },
-  { alt: 8000,  spread: 2000, pointSize: 3500, color: [212, 220, 242] as [number, number, number], opacity: 0.22 },
-  { alt: 11000, spread: 2500, pointSize: 5000, color: [200, 210, 238] as [number, number, number], opacity: 0.15 },
+/**
+ * Cloud bands — SMALLER points, MORE of them, proper altitude mapping.
+ * Altitude spread defines vertical extent of cloud column.
+ * Point size is in meters (sizeUnits:'meters') — kept small for density illusion.
+ */
+interface CloudBand {
+  alt: number;
+  spread: number;
+  /** Point size in meters — SMALLER for denser look */
+  pointSize: number;
+  color: [number, number, number];
+  opacity: number;
+  /** Cloud type for shape variation */
+  type: 'cumulus' | 'anvil' | 'stratus' | 'cirrus';
+}
+
+const CLOUD_BANDS: CloudBand[] = [
+  // Low cumulus — the classic puffy clouds
+  { alt: 600,  spread: 600,  pointSize: 300,  color: [248, 248, 255], opacity: 0.70, type: 'cumulus' },
+  { alt: 1200, spread: 800,  pointSize: 450,  color: [244, 245, 254], opacity: 0.60, type: 'cumulus' },
+  // Storm anvil layer — wide flat tops, dense
+  { alt: 1800, spread: 1500, pointSize: 600,  color: [200, 205, 218], opacity: 0.75, type: 'anvil' },
+  // Medium stratus — flat, layered
+  { alt: 3500, spread: 1200, pointSize: 500,  color: [230, 234, 248], opacity: 0.45, type: 'stratus' },
+  { alt: 5500, spread: 1800, pointSize: 700,  color: [220, 226, 244], opacity: 0.35, type: 'stratus' },
+  // High cirrus — thin, wispy, translucent
+  { alt: 8000, spread: 2500, pointSize: 800,  color: [208, 216, 240], opacity: 0.20, type: 'cirrus' },
+  { alt: 10500, spread: 3000, pointSize: 1000, color: [196, 206, 236], opacity: 0.12, type: 'cirrus' },
 ];
+
+// ── Rain streak state ─────────────────────────────────────────────────
+
+interface RainDropState {
+  lon: number;
+  lat: number;
+  elev: number;       // current elevation (falls from cloud base to ground)
+  cloudBase: number;  // spawn altitude
+  fallSpeed: number;  // meters per frame
+  streakLen: number;  // streak length in meters
+  intensity: number;
+  age: number;
+  maxAge: number;
+  driftLon: number;
+  driftLat: number;
+}
+
+const MAX_RAIN_DROPS = 4000;
+const RAIN_SPAWN_PER_TICK = 100;
+const CLOUD_BASE_MIN = 600;
+const CLOUD_BASE_MAX = 2800;
+const GROUND_ELEV = 5;
 
 // ── Main class ────────────────────────────────────────────────────────
 
@@ -90,7 +131,7 @@ export class DeckLayers {
   private radarVisible = true;
 
   private focusedCity: City | null = null;
-  private cloudData: CloudPoint[][] = []; // one array per band
+  private cloudData: CloudPoint[][] = [];
 
   // Wind state
   private windLon = new Float64Array(NUM_WIND_PARTICLES);
@@ -101,7 +142,10 @@ export class DeckLayers {
   private windTrailHead = new Uint16Array(NUM_WIND_PARTICLES);
 
   private windData: WindTrail[] = [];
-  private rainData: RainDrop[] = [];
+
+  // Rain state — elevation-based drops
+  private rainDrops: RainDropState[] = [];
+  private rainData: RainStreak[] = [];
 
   private animId: number | null = null;
   private frameCount = 0;
@@ -126,15 +170,12 @@ export class DeckLayers {
   onMapReady(map: maplibregl.Map): void {
     this.map = map;
 
-    // Load radar data immediately, then start animation
     loadRadarCells().then(() => {
-      this.buildRainData();
       this.updateLayers();
     });
 
     this.startAnimation();
 
-    // Re-render on map interaction so deck.gl stays synced
     map.on('move',   () => this.updateLayers());
     map.on('zoom',   () => this.updateLayers());
     map.on('rotate', () => this.updateLayers());
@@ -164,73 +205,86 @@ export class DeckLayers {
     if (this.animId) cancelAnimationFrame(this.animId);
   }
 
-  // ── Volumetric cloud generation (noise-texture driven) ───────────────
-  // Reference: Horizon: Zero Dawn technique
-  // - 2D noise texture defines cloud SHAPE (where clouds are thick/thin)
-  // - 2nd noise texture defines HEIGHT PROFILE (stratus vs cumulus vs cumulonimbus)
-  // - Particles placed only where noise > threshold
-  // - Particle altitude varies per-column based on height noise
+  // ── Volumetric cloud generation ──────────────────────────────────────
+  // Noise-driven, storm-aware, with proper altitude bands.
+  // MORE smaller particles for denser, more realistic look.
 
   private generateVolumetricClouds(city: City): void {
-    // Generate noise textures (seeded per-city for variety)
     const seed = Math.round(city.lon * 7 + city.lat * 13) % 1000;
     const noiseW = 256, noiseH = 128;
     const cloudNoise = generateCloudNoise(noiseW, noiseH, seed);
     const heightNoise = generateHeightNoise(noiseW, noiseH, seed + 33);
+    const stormNoise = generateStormNoise(noiseW, noiseH, seed + 77);
 
     const bands: CloudPoint[][] = CLOUD_BANDS.map(() => []);
-    const regionRadius = 0.6; // degrees around city
-    const gridStep = 0.015;   // ~1.5km grid
+    const regionRadius = 0.8; // LARGER coverage area
+    const gridStep = 0.01;    // finer grid → more particles
 
     for (let dy = -regionRadius; dy <= regionRadius; dy += gridStep) {
       for (let dx = -regionRadius; dx <= regionRadius; dx += gridStep) {
-        // Sample noise texture at this position
-        const nu = (dx / regionRadius + 1) * 0.5; // 0-1
-        const nv = (dy / regionRadius + 1) * 0.5; // 0-1
+        const nu = (dx / regionRadius + 1) * 0.5;
+        const nv = (dy / regionRadius + 1) * 0.5;
         const ni = Math.floor(nu * (noiseW - 1));
         const nj = Math.floor(nv * (noiseH - 1));
-        const noiseVal = cloudNoise[nj * noiseW + ni];
-        const hVal = heightNoise[nj * noiseW + ni];
+        const noiseIdx = nj * noiseW + ni;
+        const noiseVal = cloudNoise[noiseIdx];
+        const hVal = heightNoise[noiseIdx];
+        const stormVal = stormNoise[noiseIdx];
 
-        if (noiseVal < 0.05) continue; // clear sky
+        if (noiseVal < 0.05) continue;
 
-        // Height profile: how many bands this column fills
-        // hVal=0 → only low bands; hVal=1 → all bands (tall cumulonimbus)
-        const maxBand = Math.ceil(hVal * CLOUD_BANDS.length);
-
-        // Edge falloff for region boundary
         const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
         const edgeFade = Math.max(0, 1 - dist * dist);
-
         const cloudDensity = noiseVal * edgeFade;
         if (cloudDensity < 0.05) continue;
 
-        // Place particles in each applicable band
-        for (let bi = 0; bi < maxBand; bi++) {
+        // Height profile: how tall this cloud column is
+        const maxBand = Math.ceil((0.3 + hVal * 0.7) * CLOUD_BANDS.length);
+
+        for (let bi = 0; bi < Math.min(maxBand, CLOUD_BANDS.length); bi++) {
           const cfg = CLOUD_BANDS[bi];
 
-          // More particles in denser areas, fewer at high altitudes
-          const bandDensity = cloudDensity * (1 - bi * 0.12);
-          const numPts = Math.ceil(bandDensity * 2.5);
+          // Anvil band: only where storm intensity is high
+          if (cfg.type === 'anvil' && stormVal < 0.2) continue;
+
+          let effectiveDensity = cloudDensity;
+          if (cfg.type === 'anvil') {
+            effectiveDensity *= stormVal * 1.5;
+          }
+
+          if (effectiveDensity < 0.04) continue;
+
+          // MORE particles, SMALLER — higher density multiplier
+          const densityMul = cfg.type === 'cirrus' ? 2 : 4;
+          const numPts = Math.max(1, Math.ceil(effectiveDensity * densityMul));
 
           for (let p = 0; p < numPts; p++) {
-            const jitterX = (Math.random() - 0.5) * gridStep * 1.2;
-            const jitterY = (Math.random() - 0.5) * gridStep * 1.2;
-            const alt = cfg.alt + (Math.random() - 0.5) * cfg.spread;
+            const jitterX = (Math.random() - 0.5) * gridStep * 1.3;
+            const jitterY = (Math.random() - 0.5) * gridStep * 1.3;
 
-            // Normal: mostly upward with some variation
+            // Altitude modulation by height noise
+            const heightMod = cfg.type === 'anvil'
+              ? 1.0 + hVal * 0.6
+              : 0.7 + hVal * 0.3;
+            const altBase = cfg.alt * heightMod;
+            const altSpread = cfg.spread * heightMod;
+            const alt = altBase + (Math.random() - 0.5) * altSpread;
+
             const angle = Math.random() * Math.PI * 2;
-            const tilt = (Math.random() - 0.5) * 0.5;
+            const tilt = (Math.random() - 0.5) * 0.4;
 
-            // Color: brighter in dense core, subtle blue tint at edges
-            const bright = 0.82 + cloudDensity * 0.18;
-            const edge = Math.min(1, dist * 2);
+            // Color: storm clouds darker, normal clouds brighter
+            let brightness = 0.85 + effectiveDensity * 0.15;
+            const alpha = cfg.opacity * (0.6 + effectiveDensity * 0.4);
+            if (cfg.type === 'anvil') {
+              brightness *= 0.7; // storm clouds are darker
+            }
 
             bands[bi].push({
               position: [
                 city.lon + dx + jitterX,
                 city.lat + dy + jitterY,
-                Math.max(30, alt),
+                Math.max(20, alt),
               ],
               normal: [
                 Math.cos(angle) * Math.cos(tilt),
@@ -238,9 +292,10 @@ export class DeckLayers {
                 0.75 + Math.sin(tilt) * 0.25,
               ],
               color: [
-                Math.round(cfg.color[0] * bright - edge * 15),
-                Math.round(cfg.color[1] * bright - edge * 12),
-                Math.round(cfg.color[2] * bright - edge * 6),
+                Math.round(cfg.color[0] * brightness),
+                Math.round(cfg.color[1] * brightness),
+                Math.round(cfg.color[2] * brightness),
+                Math.round(alpha * 255),
               ],
             });
           }
@@ -250,10 +305,10 @@ export class DeckLayers {
 
     this.cloudData = bands;
     const total = bands.reduce((s, b) => s + b.length, 0);
-    console.log(`[DeckClouds] ${total} points for ${city.name} (${noiseW}×${noiseH} noise texture)`);
+    console.log(`[DeckClouds] ${total} pts for ${city.name} across ${CLOUD_BANDS.length} bands`);
   }
 
-  // ── Wind (reference: globe example — path-based animation) ──────────
+  // ── Wind ────────────────────────────────────────────────────────────
 
   private spawnWindParticle(i: number): void {
     this.windLon[i] = (Math.random() - 0.5) * 360;
@@ -319,7 +374,6 @@ export class DeckLayers {
 
       if (this.windAge[i] < WIND_TRAIL_LENGTH || spd < 0.5) continue;
 
-      // Skip dateline wrapping
       let skip = false;
       for (let t = 0; t < WIND_TRAIL_LENGTH - 1; t++) {
         const s0 = (head + t) % WIND_TRAIL_LENGTH;
@@ -345,32 +399,74 @@ export class DeckLayers {
     this.windData = trails;
   }
 
-  // ── Rain (from real radar data) ──────────────────────────────────────
+  // ── Rain — vertical streaks from cloud base to ground ────────────────
 
-  private buildRainData(): void {
+  private tickRain(): void {
     const cells = getCachedRadarCells();
-    if (cells.length === 0) { this.rainData = []; return; }
 
-    const drops: RainDrop[] = [];
+    // Spawn new drops from radar cells
+    if (cells.length > 0) {
+      for (let i = 0; i < RAIN_SPAWN_PER_TICK; i++) {
+        const cell = cells[Math.floor(Math.random() * cells.length)];
+        if (Math.random() > cell.intensity) continue;
+        if (this.rainDrops.length >= MAX_RAIN_DROPS) break;
 
-    // Sample radar cells into deck.gl points
-    // Each cell becomes a rain drop with color based on intensity
-    const step = Math.max(1, Math.floor(cells.length / 3000)); // cap at ~3000 drops
-    for (let i = 0; i < cells.length; i += step) {
-      const cell = cells[i];
-      if (cell.intensity < 0.1) continue;
+        const cloudBase = CLOUD_BASE_MIN + (1 - cell.intensity) * (CLOUD_BASE_MAX - CLOUD_BASE_MIN);
 
-      const bin = Math.min(4, Math.floor(cell.intensity * 5));
-      const [r, g, b] = RAIN_COLORS[bin];
+        this.rainDrops.push({
+          lon: cell.lon + (Math.random() - 0.5) * 0.3,
+          lat: cell.lat + (Math.random() - 0.5) * 0.2,
+          elev: cloudBase,
+          cloudBase,
+          fallSpeed: 30 + Math.random() * 50 + cell.intensity * 25,
+          streakLen: 80 + Math.random() * 150 + cell.intensity * 120,
+          intensity: cell.intensity,
+          age: 0,
+          maxAge: 50 + Math.floor(Math.random() * 50),
+          driftLon: (Math.random() - 0.5) * 0.0008,
+          driftLat: (Math.random() - 0.5) * 0.0004,
+        });
+      }
+    }
 
-      drops.push({
-        position: [cell.lon, cell.lat, 0],
-        color: [r, g, b],
-        radius: 2000 + cell.intensity * 8000,
+    // Update drops and build streaks
+    const streaks: RainStreak[] = [];
+
+    for (let i = this.rainDrops.length - 1; i >= 0; i--) {
+      const d = this.rainDrops[i];
+      d.age++;
+      d.elev -= d.fallSpeed;
+      d.lon += d.driftLon;
+      d.lat += d.driftLat;
+
+      if (d.elev <= GROUND_ELEV || d.age >= d.maxAge) {
+        this.rainDrops[i] = this.rainDrops[this.rainDrops.length - 1];
+        this.rainDrops.pop();
+        continue;
+      }
+      if (Math.abs(d.lat) > 85) continue;
+
+      // Vertical streak: same lon/lat, elevation descends
+      const topElev = d.elev + d.streakLen;
+      const botElev = d.elev;
+
+      const ageFade = d.age < 5 ? d.age / 5 : 1.0;
+      const groundFade = botElev < 150 ? botElev / 150 : 1.0;
+      const fade = ageFade * groundFade;
+
+      const bin = Math.min(4, Math.floor(d.intensity * 5));
+      const [r, g, b, a] = RAIN_COLORS[bin];
+
+      streaks.push({
+        path: [
+          [d.lon, d.lat, topElev],
+          [d.lon, d.lat, botElev],
+        ],
+        color: [r, g, b, Math.round(a * fade)],
       });
     }
 
-    this.rainData = drops;
+    this.rainData = streaks;
   }
 
   // ── Animation ───────────────────────────────────────────────────────
@@ -379,18 +475,18 @@ export class DeckLayers {
     let lastFrame = 0;
     let lastRadarRefresh = 0;
     const tick = (now: number) => {
-      if (now - lastFrame > 66) { // ~15fps
+      if (now - lastFrame > 66) {
         lastFrame = now;
         this.frameCount++;
         this.advectAndBuildWind();
+        this.tickRain();
 
         // Refresh radar every 5 minutes
         if (now - lastRadarRefresh > 5 * 60 * 1000) {
           lastRadarRefresh = now;
-          loadRadarCells().then(() => this.buildRainData());
+          loadRadarCells();
         }
 
-        if (this.frameCount % 3 === 0) this.buildRainData();
         this.updateLayers();
       }
       this.animId = requestAnimationFrame(tick);
@@ -403,19 +499,18 @@ export class DeckLayers {
   private updateLayers(): void {
     const layers: any[] = [];
 
-    // Rain — ScatterplotLayer (flat circles, fast)
+    // Rain — vertical streaks via PathLayer (same lon/lat, descending elevation)
     if (this.radarVisible && this.rainData.length > 0) {
-      layers.push(new ScatterplotLayer({
+      layers.push(new PathLayer({
         id: 'deck-rain',
         data: this.rainData,
-        getPosition: (d: RainDrop) => d.position,
-        getRadius: (d: RainDrop) => d.radius,
-        getFillColor: (d: RainDrop) => d.color,
-        opacity: 0.4,
-        radiusUnits: 'meters',
-        radiusMinPixels: 1,
-        radiusMaxPixels: 10,
+        getPath: (d: RainStreak) => d.path,
+        getColor: (d: RainStreak) => d.color,
+        getWidth: 1.5,
+        widthUnits: 'pixels',
+        opacity: 0.85,
         pickable: false,
+        capRounded: true,
       }));
     }
 
@@ -435,9 +530,8 @@ export class DeckLayers {
       }));
     }
 
-    // Volumetric clouds — PointCloudLayer per band (3D lit spheres)
-    // Reference: deck.gl/examples/point-cloud
-    //   PointCloudLayer with sizeUnits:'meters', pointSize, material, getNormal
+    // Clouds — PointCloudLayer per band
+    // SMALLER points + MORE bands = denser, more realistic cloud mass
     if (this.cloudVisible && this.cloudData.length > 0) {
       for (let bi = 0; bi < CLOUD_BANDS.length; bi++) {
         const cfg = CLOUD_BANDS[bi];
@@ -449,16 +543,15 @@ export class DeckLayers {
           data: points,
           getPosition: (d: CloudPoint) => d.position,
           getNormal: (d: CloudPoint) => d.normal,
-          getColor: (d: CloudPoint) => d.color,
+          getColor: (d: CloudPoint) => [d.color[0], d.color[1], d.color[2]],
           pointSize: cfg.pointSize,
           sizeUnits: 'meters',
           opacity: cfg.opacity,
           pickable: false,
-          // Phong-like material for volumetric lighting
           material: {
-            ambient: 0.6,
-            diffuse: 0.7,
-            shininess: 20,
+            ambient: cfg.type === 'anvil' ? 0.4 : 0.6,
+            diffuse: cfg.type === 'anvil' ? 0.5 : 0.7,
+            shininess: cfg.type === 'cirrus' ? 10 : 20,
             specularColor: [200, 200, 210],
           },
         }));
