@@ -1,12 +1,98 @@
 /**
  * Tile routes — Serve pre-rendered weather tiles for the globe.
  * Generates tiles from the procedural weather grid on-the-fly.
+ * 
+ * Cloud texture endpoint: builds 2D intensity textures for volumetric rendering.
  */
 
 import { Router } from 'express';
 import { generateWeatherGrid } from '../normalize/grid';
+import { buildCloudTexture } from '../texture/composer';
 
 export const tileRouter = Router();
+
+// Cloud texture cache
+const cloudTextureCache = new Map<string, { data: any; expiry: number }>();
+const CLOUD_TEXTURE_TTL = 3600000; // 1 hour
+
+/**
+ * GET /api/tiles/cloud-texture/:z/:x/:y.png
+ * Cloud intensity texture tile for volumetric rendering.
+ * Returns single-channel float (0-1) as 8-bit grayscale PNG.
+ */
+tileRouter.get('/cloud-texture/:z/:x/:y.png', async (req, res) => {
+  const { z, x, y } = req.params;
+  const debug = req.query.debug === 'true';
+
+  const cacheKey = `cloud-tex_${z}_${x}_${y}`;
+
+  // Check cache
+  const cached = cloudTextureCache.get(cacheKey);
+  if (cached && cached.expiry > Date.now()) {
+    res.set('Content-Type', 'application/json');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.set('ETag', `"ct-${z}-${x}-${y}-${Math.floor(Date.now() / 3600000)}"`);
+    return res.json(cached.data);
+  }
+
+  try {
+    // Convert tile coords to lat/lon bounds
+    const zoomLevels = Math.pow(2, parseInt(z));
+    const tileX = parseInt(x);
+    const tileY = parseInt(y);
+
+    const lonMin = (tileX / zoomLevels) * 360 - 180;
+    const lonMax = ((tileX + 1) / zoomLevels) * 360 - 180;
+    const latMax = 90 - (tileY / zoomLevels) * 180;
+    const latMin = 90 - ((tileY + 1) / zoomLevels) * 180;
+
+    // Build cloud texture for this tile
+    const texture = await buildCloudTexture(lonMin, lonMax, latMin, latMax, 256, 256);
+
+    // Encode as JSON (client can upload as Float32Array texture)
+    const response: any = {
+      width: texture.width,
+      height: texture.height,
+      data: Array.from(texture.data),
+      windU: Array.from(texture.windU),
+      windV: Array.from(texture.windV),
+      source: texture.source,
+      timestamp: texture.timestamp,
+      bounds: { lonMin, lonMax, latMin, latMax },
+    };
+
+    if (texture.layers) {
+      response.layers = {
+        low: Array.from(texture.layers.low),
+        medium: Array.from(texture.layers.medium),
+        high: Array.from(texture.layers.high),
+      };
+    }
+
+    if (debug) {
+      response.debug = {
+        cacheKey,
+        z, x, y,
+        ttl: CLOUD_TEXTURE_TTL,
+      };
+    }
+
+    // Cache
+    cloudTextureCache.set(cacheKey, { data: response, expiry: Date.now() + CLOUD_TEXTURE_TTL });
+
+    res.set('Content-Type', 'application/json');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.set('ETag', `"ct-${z}-${x}-${y}-${Math.floor(Date.now() / 3600000)}"`);
+    res.json(response);
+
+    console.log(`[Tiles] Cloud texture ${z}/${x}/${y} from ${texture.source}`);
+  } catch (err: any) {
+    console.error(`[Tiles] Cloud texture error:`, err.message);
+    res.status(500).json({ error: 'Texture generation failed', message: err.message });
+  }
+});
+
+// ── Existing weather tiles ────────────────────────────────────────────
 
 // Tile cache (in-memory for simplicity)
 const tileCache = new Map<string, { data: Buffer; expiry: number }>();

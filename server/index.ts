@@ -96,6 +96,7 @@ app.get('/api', (_req, res) => {
       },
       tiles: {
         'GET /api/tiles/:field/:z/:x/:y.png?level=...&time=...': 'Get weather tile (field: clouds, temperature, humidity, wind, pressure)',
+        'GET /api/tiles/cloud-texture/:z/:x/:y.png?debug=...': 'Get cloud intensity texture for volumetric rendering (GFS→OpenMeteo→POWER→procedural)',
         'GET /api/tiles/:field/meta': 'Get tile metadata',
       },
     },

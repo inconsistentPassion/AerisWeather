@@ -120,10 +120,89 @@ GET /api/weather/cycle                                # Current GFS cycle info
 GET /api/tiles/:field/:z/:x/:y.png?level=...         # Weather tiles
 ```
 
+## Cloud Texture Pipeline
+
+The `/api/tiles/cloud-texture/:z/:x/:y.png` endpoint produces 2D intensity textures (0–1 float) for volumetric cloud rendering.
+
+### Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Base Field                                                │
+│    GFS (3D cloud fraction, per-level weighted)               │
+│      ↓ fails                                                 │
+│    Open-Meteo (hourly cloudcover_low/mid/high from GFS)      │
+│      ↓ fails                                                 │
+│    POWER (CLOUD_OD → τ→density via 1-exp(-τ/8))             │
+│      ↓ fails                                                 │
+│    Procedural (ITCZ + storm tracks + diurnal)                │
+├─────────────────────────────────────────────────────────────┤
+│ 2. Satellite Detail (optional)                               │
+│    GOES-16/18 visible/IR → high-frequency cloud shapes       │
+│    Overlay blend: base * (1 + (sat - 0.5) * 0.3)            │
+├─────────────────────────────────────────────────────────────┤
+│ 3. Procedural Noise                                          │
+│    FBM (4 octaves) + Worley → 3D structure                   │
+│    Amplitude modulated by base density                       │
+├─────────────────────────────────────────────────────────────┤
+│ 4. Encode                                                    │
+│    smoothstep(0, 1, base) → final intensity 0–1              │
+│    JSON with Float32 data array + wind flowmap               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Shader contract
+
+```glsl
+// Input: single-channel texture T(x,y) in [0,1]
+// Density field in raymarcher:
+density_sample = pow(T(x,y), gamma) * height_falloff(z) * noise3D(x,y,z)
+// gamma ∈ [1.2, 1.8] biases toward thick clouds
+
+// Layering: use T.layers.low/mid/high for altitude bands
+// Advection: use windU/windV to animate texture coords (flowmap)
+```
+
+### Texture response schema
+
+```json
+{
+  "width": 256,
+  "height": 256,
+  "data": [0.0, 0.12, ...],       // intensity 0-1
+  "windU": [1.2, ...],             // east-west wind (m/s)
+  "windV": [-0.5, ...],            // north-south wind (m/s)
+  "source": "GFS+GOES-16",        // provenance
+  "timestamp": "2026-04-20T12:00:00Z",
+  "bounds": { "lonMin": -10, "lonMax": 0, "latMin": 30, "latMax": 40 },
+  "layers": {
+    "low": [0.8, ...],            // optional, per-layer fractions
+    "medium": [0.3, ...],
+    "high": [0.1, ...]
+  }
+}
+```
+
+### Data Sources
+
+| Source | What it provides | Resolution | Use for |
+|--------|-----------------|------------|---------|
+| NOAA GFS (GRIB2) | 3D cloud fraction, cloud water/ice, winds | 0.25° | Primary physical base; per-level weighted sum |
+| Open-Meteo (hourly) | cloudcover_low/mid/high (GFS model) | model dependent | Quick hourly layered fallback |
+| NASA POWER (CLOUD_OD) | Cloud optical depth (CERES SYN1deg) | ~1° | Thickness field; τ→density mapping |
+| GOES-16/18 (AWS) | Visible/IR satellite imagery | 0.5–2 km | High-res detail overlay; real cloud shapes |
+
+### Caching
+
+- Cloud textures: **1 hour** TTL
+- GFS GRIB2 + parsed JSON: **1 hour** TTL
+- POWER responses: **1 hour** TTL
+- GOES satellite: **15 minutes** (update cadence)
+
 ### POWER Constraints
 
 - **CLOUD_OD only** — POWER fallback provides cloud optical depth via hourly CERES SYN1deg (~1° resolution)
-- **No layer fractions** — CLDLOW/CLDMID/CLDHIGH are daily-only and not used; GFS is the source for per-level cloud fraction
+- **No layer fractions** — CLDLOW/CLDMID/CLDHIGH are daily-only and not used; GFS and Open-Meteo provide per-level cloud fraction
 - **Future dates** — POWER returns HTTP 422; the server detects this and reports accordingly
 - **No API key** — both GFS (AWS Open Data) and POWER are free
 
