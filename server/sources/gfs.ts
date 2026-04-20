@@ -8,6 +8,13 @@
  *   - HCDC: High Cloud Cover (%)
  *   - UGRD/VGRD at pressure levels for wind per layer
  *
+ * For the /weather/clouds endpoint, also extracts pressure-level variables:
+ *   - TCDC (3D cloud fraction at pressure levels)
+ *   - CLWMR (cloud liquid water mixing ratio)
+ *   - CIWMR (cloud ice water mixing ratio)
+ *   - TMP (temperature profile)
+ *   - UGRD/VGRD (wind for advection)
+ *
  * Falls back to procedural generation if wgrib2 is unavailable.
  */
 
@@ -35,6 +42,27 @@ export interface GFSCloudLayers {
   windU: Float32Array;     // UGRD at representative level per cell
   windV: Float32Array;     // VGRD at representative level per cell
 }
+
+/** Pressure-level point extraction for /weather/clouds */
+export interface GFSPointCloudData {
+  source: 'GFS';
+  time: string;
+  cycle: GFSCycle;
+  forecastHour: number;
+  levels: number[];          // pressure in hPa
+  cloud_fraction: number[];  // per level (0-1)
+  cloud_water: number[];     // CLWMR per level (kg/kg)
+  cloud_ice: number[];       // CIWMR per level (kg/kg)
+  temperature: number[];     // TMP per level (K)
+  wind_u: number[];          // UGRD per level (m/s)
+  wind_v: number[];          // VGRD per level (m/s)
+  optical_depth: number | null;
+  confidence: 'high' | 'medium' | 'low';
+  debug?: Record<string, unknown>;
+}
+
+/** Pressure levels to extract for point queries */
+const PRESSURE_LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100];
 
 const CACHE_DIR = path.join(process.cwd(), 'cache', 'gfs');
 const CACHE_TTL = 3600; // 1 hour
@@ -293,6 +321,239 @@ export function cleanCache(): void {
     }
     if (cleaned > 0) console.log(`[GFS] Cleaned ${cleaned} cached files`);
   } catch {}
+}
+
+// ── Point-level extraction for /weather/clouds ────────────────────────
+
+/**
+ * Extract a single variable at a specific pressure level from a GRIB2 file,
+ * then bilinear-interpolate to the requested (lat, lon) point.
+ * Returns the value at the point, or null if the field is missing.
+ */
+function extractFieldAtPoint(
+  grib2Path: string,
+  variable: string,
+  pressureHpa: number,
+  lat: number,
+  lon: number
+): number | null {
+  try {
+    const levelStr = `${pressureHpa} mb`;
+    const cmd = `wgrib2 "${grib2Path}" -s | grep '${variable}' | grep '${levelStr}' | wgrib2 -i "${grib2Path}" -csv /dev/stdout 2>/dev/null`;
+    const output = execSync(cmd, {
+      encoding: 'utf-8',
+      timeout: 15000,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+
+    if (!output || output.trim().length === 0) return null;
+
+    // Parse CSV to full grid, then bilinear-interpolate to point
+    const grid = parseWgrib2Csv(output, GFS_WIDTH, GFS_HEIGHT);
+    return bilinearInterpolate(grid, GFS_WIDTH, GFS_HEIGHT, lat, lon);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bilinear interpolation of a 0.25° GFS grid to an arbitrary (lat, lon) point.
+ * Grid layout: rows from 90°N to 90°S, columns from 0°E to 359.75°E.
+ */
+function bilinearInterpolate(
+  grid: Float32Array,
+  width: number,
+  height: number,
+  lat: number,
+  lon: number
+): number {
+  // Map lat/lon to fractional grid indices
+  const gx = ((lon + 180) / 360) * width;
+  const gy = ((90 - lat) / 180) * height;
+
+  const x0 = Math.floor(gx) % width;
+  const x1 = (x0 + 1) % width;
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(gy)));
+  const y1 = Math.max(0, Math.min(height - 1, y0 + 1));
+
+  const fx = gx - Math.floor(gx);
+  const fy = gy - Math.floor(gy);
+
+  const v00 = grid[y0 * width + x0] ?? 0;
+  const v10 = grid[y0 * width + x1] ?? 0;
+  const v01 = grid[y1 * width + x0] ?? 0;
+  const v11 = grid[y1 * width + x1] ?? 0;
+
+  return v00 * (1 - fx) * (1 - fy) + v10 * fx * (1 - fy) +
+         v01 * (1 - fx) * fy + v11 * fx * fy;
+}
+
+/**
+ * Extract cloud-related fields at a single (lat, lon) point across pressure levels.
+ *
+ * Tries to extract:
+ *   - TCDC (Total Cloud Cover) at each pressure level → cloud_fraction
+ *   - CLWMR (Cloud Liquid Water Mixing Ratio) → cloud_water (kg/kg)
+ *   - CIWMR (Cloud Ice Water Mixing Ratio) → cloud_ice (kg/kg)
+ *   - TMP (Temperature) → temperature (K)
+ *   - UGRD/VGRD (Wind) → wind_u/wind_v (m/s)
+ *
+ * If TCDC is not found, falls back to layer-based LCDC/MCDC/HCDC.
+ * Missing variables are filled with null-like values.
+ */
+export async function fetchGFSPointCloud(
+  cycle: GFSCycle,
+  fhour: number,
+  lat: number,
+  lon: number,
+  debug = false
+): Promise<GFSPointCloudData | null> {
+  if (!checkWgrib2()) return null;
+
+  // Ensure GRIB2 file exists (download or use cache)
+  const grib2Path = path.join(CACHE_DIR, `${cycle.date}_${cycle.hour}_f${String(fhour).padStart(3, '0')}.grib2`);
+  const cacheJsonPath = grib2Path + '_point.json';
+
+  // Check point cache
+  const pointCacheKey = `${cycle.date}_${cycle.hour}_f${String(fhour).padStart(3, '0')}_${lat.toFixed(2)}_${lon.toFixed(2)}`;
+  const pointCacheFile = path.join(CACHE_DIR, `point_${pointCacheKey.replace(/[.\-]/g, '_')}.json`);
+
+  if (fs.existsSync(pointCacheFile)) {
+    try {
+      const stat = fs.statSync(pointCacheFile);
+      if ((Date.now() - stat.mtimeMs) / 1000 < CACHE_TTL) {
+        return JSON.parse(fs.readFileSync(pointCacheFile, 'utf-8'));
+      }
+    } catch {}
+  }
+
+  // Download GRIB2 if not cached
+  if (!fs.existsSync(grib2Path)) {
+    const url = buildS3Url(cycle, fhour);
+    console.log(`[GFS] Downloading for point query: ${url}`);
+    const ok = await downloadGrib2(url, grib2Path);
+    if (!ok) return null;
+  }
+
+  const resultTime = new Date();
+  resultTime.setUTCHours(parseInt(cycle.hour), 0, 0, 0);
+  resultTime.setUTCDate(resultTime.getUTCDate() + Math.floor(fhour / 24));
+
+  const levels: number[] = [];
+  const cloud_fraction: number[] = [];
+  const cloud_water: number[] = [];
+  const cloud_ice: number[] = [];
+  const temperature: number[] = [];
+  const wind_u: number[] = [];
+  const wind_v: number[] = [];
+  let hasTcdc = false;
+  const debugInfo: Record<string, unknown> = {};
+
+  try {
+    // Try TCDC at each pressure level
+    for (const plevel of PRESSURE_LEVELS) {
+      const cf = extractFieldAtPoint(grib2Path, 'TCDC', plevel, lat, lon);
+      if (cf !== null) {
+        hasTcdc = true;
+        levels.push(plevel);
+        cloud_fraction.push(cf / 100); // GFS TCDC is in %
+        cloud_water.push(extractFieldAtPoint(grib2Path, 'CLWMR', plevel, lat, lon) ?? 0);
+        cloud_ice.push(extractFieldAtPoint(grib2Path, 'CIWMR', plevel, lat, lon) ?? 0);
+        temperature.push(extractFieldAtPoint(grib2Path, 'TMP', plevel, lat, lon) ?? 0);
+        wind_u.push(extractFieldAtPoint(grib2Path, 'UGRD', plevel, lat, lon) ?? 0);
+        wind_v.push(extractFieldAtPoint(grib2Path, 'VGRD', plevel, lat, lon) ?? 0);
+      }
+    }
+
+    // If TCDC not available, fall back to LCDC/MCDC/HCDC layer fields
+    if (!hasTcdc) {
+      console.log('[GFS] TCDC not available, using LCDC/MCDC/HCDC layer fields');
+      const lcf = extractFieldAtPoint(grib2Path, 'LCDC', 0, lat, lon);
+      const mcf = extractFieldAtPoint(grib2Path, 'MCDC', 0, lat, lon);
+      const hcf = extractFieldAtPoint(grib2Path, 'HCDC', 0, lat, lon);
+
+      // Map layer fields to representative pressure levels
+      const layerMapping = [
+        { plevel: 925, cf: lcf },
+        { plevel: 850, cf: lcf },
+        { plevel: 700, cf: mcf },
+        { plevel: 500, cf: mcf },
+        { plevel: 300, cf: hcf },
+        { plevel: 200, cf: hcf },
+      ];
+
+      for (const layer of layerMapping) {
+        if (layer.cf !== null) {
+          levels.push(layer.plevel);
+          cloud_fraction.push(layer.cf / 100);
+          cloud_water.push(0);
+          cloud_ice.push(0);
+          temperature.push(extractFieldAtPoint(grib2Path, 'TMP', layer.plevel, lat, lon) ?? 0);
+          wind_u.push(extractFieldAtPoint(grib2Path, 'UGRD', layer.plevel, lat, lon) ?? 0);
+          wind_v.push(extractFieldAtPoint(grib2Path, 'VGRD', layer.plevel, lat, lon) ?? 0);
+        }
+      }
+
+      if (debug) debugInfo.layerFallback = true;
+    }
+
+    if (debug) {
+      debugInfo.hasTcdc = hasTcdc;
+      debugInfo.levelsExtracted = levels.length;
+      debugInfo.cycle = cycle;
+      debugInfo.forecastHour = fhour;
+      debugInfo.requestedPoint = { lat, lon };
+    }
+
+    if (levels.length === 0) {
+      console.warn('[GFS] No cloud data extracted for point query');
+      return null;
+    }
+
+    // Compute total optical depth from cloud water/ice profiles (rough estimate)
+    // τ ≈ Σ (q_cloud * Δp / g) * k_ext  where k_ext ~ 100 m²/kg (approximate)
+    let optical_depth: number | null = null;
+    if (hasTcdc && cloud_water.some(v => v > 0)) {
+      const G = 9.81;
+      const K_EXT_LIQ = 100;  // m²/kg (approximate mass extinction)
+      const K_EXT_ICE = 80;
+      let tau = 0;
+      for (let i = 0; i < levels.length; i++) {
+        const dp = i > 0 ? Math.abs(levels[i] - levels[i - 1]) * 100 : 5000; // hPa → Pa
+        tau += (cloud_water[i] * K_EXT_LIQ + cloud_ice[i] * K_EXT_ICE) * dp / G;
+      }
+      optical_depth = tau > 0 ? Math.round(tau * 1000) / 1000 : null;
+    }
+
+    const pointData: GFSPointCloudData = {
+      source: 'GFS',
+      time: `${cycle.date.slice(0, 4)}-${cycle.date.slice(4, 6)}-${cycle.date.slice(6, 8)}T${cycle.hour}:00:00Z`,
+      cycle,
+      forecastHour: fhour,
+      levels,
+      cloud_fraction,
+      cloud_water,
+      cloud_ice,
+      temperature,
+      wind_u,
+      wind_v,
+      optical_depth,
+      confidence: hasTcdc ? 'high' : 'medium',
+    };
+
+    if (debug) pointData.debug = debugInfo;
+
+    // Cache point result
+    try {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      fs.writeFileSync(pointCacheFile, JSON.stringify(pointData), 'utf-8');
+    } catch {}
+
+    return pointData;
+  } catch (err) {
+    console.warn(`[GFS] Point extraction failed: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 // Run cleanup every 30 minutes

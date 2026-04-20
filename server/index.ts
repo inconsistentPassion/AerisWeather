@@ -7,6 +7,7 @@ import express from 'express';
 import cors from 'cors';
 import { weatherRouter } from './routes/weather';
 import { tileRouter } from './routes/tiles';
+import { cloudRouter } from './routes/clouds';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
@@ -57,6 +58,7 @@ app.use((req, res, next) => {
 
 // Routes
 app.use('/api/weather', weatherRouter);
+app.use('/api/weather', cloudRouter);
 app.use('/api/tiles', tileRouter);
 
 // Enhanced health check
@@ -88,6 +90,7 @@ app.get('/api', (_req, res) => {
         'GET /api/weather/grid?level=...&time=...': 'Get weather grid data',
         'GET /api/weather/forecast?level=...&hours=...': 'Get forecast timeline',
         'GET /api/weather/cycle': 'Get current GFS cycle info',
+        'GET /api/weather/clouds?lat={lat}&lon={lon}&time={iso}&debug={bool}': 'Get cloud data at point (GFS primary, NASA POWER fallback)',
         'GET /api/weather/cache/stats': 'Get cache statistics',
         'POST /api/weather/cache/clear': 'Clear weather cache',
       },
