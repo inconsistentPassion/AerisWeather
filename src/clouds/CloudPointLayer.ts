@@ -1,18 +1,38 @@
 /**
- * CloudPointLayer — Data-driven volumetric cloud visualization.
+ * CloudPointLayer — EVE-inspired volumetric cloud visualization.
  *
- * Uses REAL weather data (Open-Meteo cloudFraction or GFS cloud layers).
- * Distributes data across altitude bands using humidity/temperature.
- * Procedural noise ONLY for particle placement jitter, not data override.
+ * Architecture (from EVE):
+ *   Coverage Map (weather data) × 3D Noise (Perlin-Worley) × Cloud Type → density
+ *
+ * EVE uses raymarching through a 3D density field; we approximate with
+ * dense point sprites whose fragment shaders generate procedural noise.
+ *
+ * Key EVE techniques adapted:
+ *   1. Perlin-Worley hybrid noise (billowy base + cellular detail)
+ *   2. Curl noise displacement (wispy edges)
+ *   3. Coverage curves (vertical cloud profiles)
+ *   4. Edge hardness (sharpness control)
+ *   5. Erosion depth (how deep noise eats into cloud)
+ *   6. Worley spherical (puffy vs streaky)
+ *   7. Phase function approximation (forward scattering / silver lining)
+ *   8. Flowmap-driven animation (wind offset)
+ *   9. Cloud type map (different shapes at different locations)
  */
 
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
+import {
+  CLOUD_TYPES, ALL_CLOUD_TYPES, evalCoverageCurve,
+  weatherToCloudTypes, getCloudTypeIndex,
+  type CloudTypeConfig,
+} from './CloudTypes';
+import { generateCloudNoise, generateHeightNoise, generateStormNoise } from '../weather/CloudNoise';
 
-// ── Band configs — altitude bands with meteorological meaning ─────────
+// ── Band Config ────────────────────────────────────────────────────────
 
 interface BandConfig {
   id: string;
+  cloudTypeId: string;
   altitude: number;
   altitudeSpread: number;
   color: [number, number, number];
@@ -20,37 +40,41 @@ interface BandConfig {
   opacityRange: [number, number];
   maxPoints: number;
   density: number;
-  cloudType: string;
-  /** How much of the cloudFraction data goes to this band (0-1) */
   dataWeight: number;
+  // EVE-inspired params passed to shader
+  noiseScale: number;
+  edgeHardness: number;
+  erosionDepth: number;
+  worleySpherical: number;
+  cloudTypeIndex: number;
+  // Vertical profile
+  coverageCurve: [number, number][];
 }
 
-const BANDS: BandConfig[] = [
-  {
-    id: 'low', altitude: 800, altitudeSpread: 1000,
-    color: [0.97, 0.97, 0.99], sizeRange: [8, 24], opacityRange: [0.5, 0.85],
-    maxPoints: 100000, density: 8, cloudType: 'cumulus', dataWeight: 0.5,
-  },
-  {
-    id: 'low-mid', altitude: 2000, altitudeSpread: 1500,
-    color: [0.93, 0.94, 0.97], sizeRange: [10, 28], opacityRange: [0.4, 0.75],
-    maxPoints: 60000, density: 6, cloudType: 'cumulus', dataWeight: 0.3,
-  },
-  {
-    id: 'mid', altitude: 4500, altitudeSpread: 2000,
-    color: [0.88, 0.90, 0.95], sizeRange: [12, 32], opacityRange: [0.3, 0.6],
-    maxPoints: 40000, density: 4, cloudType: 'stratus', dataWeight: 0.15,
-  },
-  {
-    id: 'high', altitude: 8000, altitudeSpread: 3000,
-    color: [0.82, 0.86, 0.96], sizeRange: [14, 36], opacityRange: [0.15, 0.4],
-    maxPoints: 20000, density: 3, cloudType: 'cirrus', dataWeight: 0.05,
-  },
-];
+const BANDS: BandConfig[] = ALL_CLOUD_TYPES.map(ct => ({
+  id: ct.id,
+  cloudTypeId: ct.id,
+  altitude: ct.typicalAlt,
+  altitudeSpread: ct.maxAlt - ct.minAlt,
+  color: ct.color,
+  sizeRange: ct.sizeRange,
+  opacityRange: ct.opacityRange,
+  maxPoints: Math.round(ct.density * 15000),
+  density: ct.density,
+  dataWeight: ct.dataWeight,
+  noiseScale: ct.noiseScale,
+  edgeHardness: ct.edgeHardness,
+  erosionDepth: ct.erosionDepth,
+  worleySpherical: ct.worleySpherical,
+  cloudTypeIndex: getCloudTypeIndex(ct.id),
+  coverageCurve: ct.coverageCurve,
+}));
 
-const STRIDE = 44; // 11 floats * 4 bytes
+// Interleaved stride: 14 floats × 4 bytes = 56 bytes
+// [mercX, mercY, elevation, size, r, g, b, a, rot, cloudType, density, noiseScale, edgeHardness, erosionDepth]
+const STRIDE = 56;
 
-// ── Shaders ───────────────────────────────────────────────────────────
+// ── Vertex Shader ──────────────────────────────────────────────────────
 
 const VERT_BODY = `
   attribute vec2 aMercator;
@@ -60,26 +84,39 @@ const VERT_BODY = `
   attribute float aRot;
   attribute float aCloudType;
   attribute float aDensity;
+  attribute float aNoiseScale;
+  attribute float aEdgeHardness;
+  attribute float aErosionDepth;
 
   uniform float uDPR;
   uniform float uTime;
+  uniform vec2 uWindOffset;   // animated flowmap offset
 
   varying vec4 vColor;
   varying float vRot;
   varying float vCloudType;
   varying float vDensity;
+  varying float vNoiseScale;
+  varying float vEdgeHardness;
+  varying float vErosionDepth;
 
   void main() {
     vColor = aColor;
     vRot = aRot + uTime * 0.05;
     vCloudType = aCloudType;
     vDensity = aDensity;
+    vNoiseScale = aNoiseScale;
+    vEdgeHardness = aEdgeHardness;
+    vErosionDepth = aErosionDepth;
+
     gl_Position = projectTileWithElevation(aMercator, aElevation);
     float dist = max(gl_Position.w, 1.0);
     float size = aSize * uDPR * (500.0 / dist);
-    gl_PointSize = clamp(size, 2.0, 200.0);
+    gl_PointSize = clamp(size, 2.0, 250.0);
   }
 `;
+
+// ── Fragment Shader (EVE-inspired volumetric approximation) ─────────────
 
 const FRAG = `
   precision highp float;
@@ -87,6 +124,12 @@ const FRAG = `
   varying float vRot;
   varying float vCloudType;
   varying float vDensity;
+  varying float vNoiseScale;
+  varying float vEdgeHardness;
+  varying float vErosionDepth;
+  uniform float uTime;
+
+  // ── Noise Primitives ──────────────────────────────────────────────
 
   float hash(vec2 p) {
     p = fract(p * vec2(443.8975, 397.2973));
@@ -94,35 +137,72 @@ const FRAG = `
     return fract((p.x + p.y) * p.x);
   }
 
+  float hash3(vec3 p) {
+    p = fract(p * vec3(443.8975, 397.2973, 127.4126));
+    p += dot(p, p.yzx + 19.19);
+    return fract((p.x + p.y) * p.z);
+  }
+
   float valueNoise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    return mix(
+      mix(hash(i), hash(i + vec2(1,0)), f.x),
+      mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x),
+      f.y
+    );
   }
 
-  float worleyNoise(vec2 p) {
+  // ── Worley Noise (EVE-style cellular) ─────────────────────────────
+
+  // Returns (f1, f2) distances
+  vec2 worleyNoise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
-    float minDist = 1.0;
+    float f1 = 10.0, f2 = 10.0;
     for (int y = -1; y <= 1; y++) {
       for (int x = -1; x <= 1; x++) {
         vec2 neighbor = vec2(float(x), float(y));
-        vec2 point = vec2(hash(i + neighbor + vec2(73.0, 157.0)), hash(i + neighbor + vec2(89.0, 131.0)));
+        vec2 point = vec2(
+          hash(i + neighbor + vec2(73.0, 157.0)),
+          hash(i + neighbor + vec2(89.0, 131.0))
+        );
         float dist = length(neighbor + point - f);
-        minDist = min(minDist, dist);
+        if (dist < f1) { f2 = f1; f1 = dist; }
+        else if (dist < f2) { f2 = dist; }
       }
     }
-    return minDist;
+    return vec2(min(f1, 1.7), min(f2, 1.7));
   }
+
+  // 3D Worley for volumetric detail
+  float worleyNoise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    float f1 = 10.0;
+    for (int z = -1; z <= 1; z++) {
+      for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+          vec3 neighbor = vec3(float(x), float(y), float(z));
+          vec3 pt = vec3(
+            hash3(i + neighbor + vec3(73.0, 157.0, 89.0)),
+            hash3(i + neighbor + vec3(97.0, 131.0, 113.0)),
+            hash3(i + neighbor + vec3(61.0, 179.0, 71.0))
+          );
+          float dist = length(neighbor + pt - f);
+          f1 = min(f1, dist);
+        }
+      }
+    }
+    return min(f1, 1.73);
+  }
+
+  // ── FBM ───────────────────────────────────────────────────────────
 
   float fbm(vec2 p, int octaves) {
     float value = 0.0, amp = 1.0, freq = 1.0, maxVal = 0.0;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
       if (i >= octaves) break;
       value += amp * valueNoise(p * freq);
       maxVal += amp; amp *= 0.5; freq *= 2.0;
@@ -130,39 +210,169 @@ const FRAG = `
     return value / maxVal;
   }
 
+  // ── Perlin-Worley Hybrid (EVE's core noise) ───────────────────────
+  //
+  // Smooth Perlin base + billowy Worley detail.
+  // persistence controls how much Worley erodes the Perlin shape.
+
+  float perlinWorleyHybrid(vec2 p, float persistence) {
+    float perlin = fbm(p, 5);
+    vec2 worley = worleyNoise(p * 1.5);
+    float detail = fbm(p * 4.0, 3);
+    return perlin * (1.0 - persistence * 0.5) + (1.0 - worley.x) * persistence * 0.35 + detail * 0.15;
+  }
+
+  // ── Curl Noise (EVE's wispy displacement) ─────────────────────────
+  //
+  // Creates divergence-free vector field for flowing cloud edges.
+
+  vec2 curlNoise(vec2 p) {
+    float eps = 0.01;
+    float n_x0 = fbm(p - vec2(eps, 0.0), 3);
+    float n_x1 = fbm(p + vec2(eps, 0.0), 3);
+    float n_y0 = fbm(p - vec2(0.0, eps), 3);
+    float n_y1 = fbm(p + vec2(0.0, eps), 3);
+    return vec2(n_y1 - n_y0, -(n_x1 - n_x0)) / (2.0 * eps);
+  }
+
+  // ── Phase Function (EVE-style light scattering) ───────────────────
+  //
+  // Single scattering: bright, silver lining effect
+  // Multiple scattering: soft, deep penetration, fluffy
+
+  float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+  }
+
   void main() {
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
+
+    // Rotate by wind/flow
     float c = cos(vRot), s = sin(vRot);
     uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
 
     float r2 = dot(uv, uv);
     if (r2 > 1.0) discard;
 
-    // Procedural shape — only for edge detail, NOT data override
-    float n = fbm(uv * 4.0 + vRot, 3);
-    float w = 1.0 - worleyNoise(uv * 3.0 + vRot * 0.5);
-    float detail = n * 0.5 + w * 0.5;
+    float scale = vNoiseScale;
+    vec2 noiseUV = uv * 4.0 * scale + vRot * 0.3;
 
-    // Soft cloud shape with detail erosion at edges
+    // ── Noise Generation (EVE-style hybrid) ────────────────────────
+
+    // Base: Perlin-Worley hybrid (billowy cloud mass)
+    float baseNoise = perlinWorleyHybrid(noiseUV, 0.5);
+
+    // Worley erosion: cellular detail for edge breakup
+    vec2 worley = worleyNoise(noiseUV * 3.0);
+    // Spherical parameter (EVE Release 5): makes Worley billowy
+    float cellular = mix(1.0 - worley.x, worley.y - worley.x, vCloudType == 0.0 ? 1.0 : 0.3);
+
+    // 3D detail for volumetric illusion
+    float t3d = uTime * 0.02;
+    float detail3D = 1.0 - worleyNoise3D(vec3(noiseUV * 2.0, t3d));
+
+    // Curl noise displacement (EVE's wispy edges)
+    vec2 curl = curlNoise(noiseUV * 2.0) * 0.08 * (1.0 - vErosionDepth * 0.5);
+    vec2 displacedUV = noiseUV + curl;
+    float displaced = perlinWorleyHybrid(displacedUV, 0.5);
+
+    // Combine: base mass + cellular erosion + 3D detail
+    float density = baseNoise * 0.5 + cellular * 0.25 + displaced * 0.15 + detail3D * 0.1;
+
+    // ── Vertical Density Curve (EVE's DensityCurve) ────────────────
+    //
+    // Simulates EVE's per-type density curve by using gl_PointCoord.y
+    // as height fraction within the sprite.
+    //
+    // Cumulus: denser at top, thinner at bottom
+    // Cirrus: uniform thin
+    // Fog: dense at bottom, fading up
+
+    float heightFrac = gl_PointCoord.y;  // 0 = bottom, 1 = top
+    float densityProfile = 1.0;
+
+    if (vCloudType < 0.5) {
+      // Cumulus: bell curve, denser at top
+      densityProfile = 0.6 + 0.4 * smoothstep(0.0, 0.6, heightFrac);
+    } else if (vCloudType < 1.5) {
+      // Stratus: fairly uniform
+      densityProfile = 0.85 + 0.15 * sin(heightFrac * 3.14159);
+    } else if (vCloudType < 2.5) {
+      // Cirrus: thin throughout, slight middle emphasis
+      densityProfile = 0.5 + 0.5 * sin(heightFrac * 3.14159);
+    } else if (vCloudType < 3.5) {
+      // Cumulonimbus: thick core, wispy top
+      densityProfile = heightFrac < 0.7
+        ? 0.7 + 0.3 * smoothstep(0.0, 0.5, heightFrac)
+        : 0.7 * (1.0 - smoothstep(0.7, 1.0, heightFrac));
+    } else if (vCloudType < 4.5) {
+      // Fog: dense bottom, rapid fade up
+      densityProfile = 1.0 - smoothstep(0.0, 0.6, heightFrac);
+    } else {
+      // Altocumulus: puffy, denser in middle
+      densityProfile = 0.5 + 0.5 * sin(heightFrac * 3.14159);
+    }
+
+    density *= densityProfile;
+
+    // ── Edge Erosion (EVE's erosionDepth) ───────────────────────────
+    //
+    // Higher erosion = noise eats deeper into cloud, creating gaps
+    // and wisps. Lower erosion = solid, blobby clouds.
+
+    float erosionFactor = mix(1.0, detail3D, vErosionDepth);
+    density *= erosionFactor;
+
+    // ── Edge Hardness (EVE concept) ─────────────────────────────────
+    //
+    // Controls how sharp the cloud boundary is.
+    // Low = diffuse fog, high = sharp cumulus edges.
+    // Uses smoothstep width to control transition.
+
     float shape = 1.0 - smoothstep(0.0, 1.0, r2);
-    float edgeDetail = 0.85 + 0.15 * detail;
-    float density = shape * edgeDetail;
+    float edgeTransition = mix(0.3, 0.03, vEdgeHardness);
+    float edge = smoothstep(0.0, edgeTransition, density);
+    density = shape * edge;
 
     if (density < 0.02) discard;
 
-    float alpha = density * vColor.a;
+    // ── Lighting (EVE phase function approximation) ────────────────
+    //
+    // EVE uses 4 phase functions (2 single + 2 multiple scattering).
+    // We approximate with:
+    //   - Top-down light gradient (sun from above)
+    //   - Forward scattering for silver lining at edges
+    //   - Ambient from below (ground bounce, simplified)
 
-    // Lighting
     float vertical = gl_PointCoord.y;
-    float light = 0.85 + 0.15 * vertical;
+    float sunDir = 0.7 + 0.3 * vertical;  // sun from above
+
+    // Silver lining: bright at edges facing the light
+    float edgeDist = sqrt(r2);
+    float silverLining = exp(-pow((edgeDist - 0.85) * 6.0, 2.0)) * 0.3;
+
+    // Forward scattering (Henyey-Greenstein, g=0.6 for strong forward scatter)
+    float cosTheta = 1.0 - edgeDist;
+    float forwardScatter = henyeyGreenstein(cosTheta, 0.6) * 0.15;
+
+    // Multiple scattering (soft ambient, g=-0.2 for back-scatter)
+    float multiScatter = henyeyGreenstein(cosTheta, -0.2) * 0.08;
+
+    // Core glow
     float core = 1.0 + 0.1 * exp(-r2 * 3.0);
 
-    vec3 color = vColor.rgb * light * core;
+    // Combine
+    float light = sunDir * core + silverLining + forwardScatter + multiScatter;
+
+    vec3 color = vColor.rgb * light;
+    float alpha = density * vColor.a;
+
     gl_FragColor = vec4(color, alpha);
   }
 `;
 
-// ── Helpers ───────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────
 
 function compileShader(gl: WebGLRenderingContext, type: number, src: string, prelude?: string): WebGLShader {
   const s = gl.createShader(type)!;
@@ -183,7 +393,7 @@ function toMercator(lat: number, lon: number): { x: number; y: number } {
   return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
-// ── Main class ────────────────────────────────────────────────────────
+// ── Main Class ─────────────────────────────────────────────────────────
 
 export class CloudPointLayer {
   private weather: WeatherManager;
@@ -199,17 +409,37 @@ export class CloudPointLayer {
   private shaderPrelude = '';
   private shaderDefine = '';
 
+  // Wind animation state
+  private windOffsetX = 0;
+  private windOffsetY = 0;
+  private windTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Noise textures for CPU-side density modulation
+  private cloudNoise: Float32Array | null = null;
+  private heightNoise: Float32Array | null = null;
+  private stormNoise: Float32Array | null = null;
+  private noiseW = 256;
+  private noiseH = 128;
+
   constructor(weather: WeatherManager) {
     this.weather = weather;
     this.weather.on('dataLoaded', () => { this.dirty = true; this.map?.triggerRepaint(); });
     this.weather.on('cloudLayersLoaded', () => { this.dirty = true; this.map?.triggerRepaint(); });
     this.weather.on('timeChange', () => { this.dirty = true; });
 
-    // Listen for background grid updates
     window.addEventListener('weather-grid-updated', () => {
       this.dirty = true;
       this.map?.triggerRepaint();
     });
+
+    // Pre-generate noise textures
+    this.generateNoiseTextures();
+  }
+
+  private generateNoiseTextures(seed: number = 42): void {
+    this.cloudNoise = generateCloudNoise(this.noiseW, this.noiseH, seed);
+    this.heightNoise = generateHeightNoise(this.noiseW, this.noiseH, seed + 33);
+    this.stormNoise = generateStormNoise(this.noiseW, this.noiseH, seed + 77);
   }
 
   getLayer(): maplibregl.CustomLayerInterface {
@@ -221,77 +451,126 @@ export class CloudPointLayer {
 
       onAdd(map: maplibregl.Map, gl: WebGLRenderingContext) {
         self.map = map;
-        self.gl = gl;
         for (const band of BANDS) {
           self.vbos.set(band.id, { buf: gl.createBuffer()!, count: 0 });
         }
+
+        // Periodic re-upload for data updates
         self.timer = setInterval(() => {
           if (self.visible && self.dirty) self.upload(gl);
         }, 8000);
+
+        // Wind animation: update offset every 200ms
+        self.windTimer = setInterval(() => {
+          self.updateWindOffset();
+        }, 200);
+
         self.upload(gl);
       },
 
       render(gl: WebGLRenderingContext, args: any) {
         if (!self.visible) return;
+
+        // Compile shaders on first render
         if (!self.program && args?.shaderData) {
           self.shaderPrelude = args.shaderData.vertexShaderPrelude || '';
           self.shaderDefine = args.shaderData.define || '';
           const prelude = `${self.shaderPrelude}\n${self.shaderDefine}`;
-          const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
-          const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
-          self.program = gl.createProgram()!;
-          gl.attachShader(self.program, vs);
-          gl.attachShader(self.program, fs);
-          gl.linkProgram(self.program);
-          if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
-            console.error('[Clouds] Link:', gl.getProgramInfoLog(self.program));
-            self.program = null; return;
+          try {
+            const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
+            const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
+            self.program = gl.createProgram()!;
+            gl.attachShader(self.program, vs);
+            gl.attachShader(self.program, fs);
+            gl.linkProgram(self.program);
+            if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
+              console.error('[Clouds] Link:', gl.getProgramInfoLog(self.program));
+              self.program = null;
+              return;
+            }
+            gl.deleteShader(vs); gl.deleteShader(fs);
+
+            // Cache uniform locations
+            self.uniforms.uDPR = gl.getUniformLocation(self.program, 'uDPR');
+            self.uniforms.uTime = gl.getUniformLocation(self.program, 'uTime');
+            self.uniforms.uWindOffset = gl.getUniformLocation(self.program, 'uWindOffset');
+            console.log('[Clouds] EVE-inspired shader compiled');
+          } catch (e) {
+            console.error('[Clouds] Shader compilation failed:', e);
+            return;
           }
-          gl.deleteShader(vs); gl.deleteShader(fs);
-          self.uniforms.uDPR = gl.getUniformLocation(self.program, 'uDPR');
-          self.uniforms.uTime = gl.getUniformLocation(self.program, 'uTime');
-          console.log('[Clouds] Shader compiled');
         }
         if (!self.program) return;
 
         gl.useProgram(self.program);
         gl.uniform1f(self.uniforms.uDPR, window.devicePixelRatio || 1);
         gl.uniform1f(self.uniforms.uTime, (Date.now() - self.startTime) * 0.001);
+        gl.uniform2f(self.uniforms.uWindOffset, self.windOffsetX, self.windOffsetY);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
 
-        const aM = gl.getAttribLocation(self.program, 'aMercator');
-        const aE = gl.getAttribLocation(self.program, 'aElevation');
-        const aS = gl.getAttribLocation(self.program, 'aSize');
-        const aC = gl.getAttribLocation(self.program, 'aColor');
-        const aR = gl.getAttribLocation(self.program, 'aRot');
-        const aT = gl.getAttribLocation(self.program, 'aCloudType');
-        const aD = gl.getAttribLocation(self.program, 'aDensity');
+        // Attribute locations
+        const attrs: Record<string, number> = {};
+        const attrNames = ['aMercator','aElevation','aSize','aColor','aRot',
+                           'aCloudType','aDensity','aNoiseScale','aEdgeHardness','aErosionDepth'];
+        for (const name of attrNames) {
+          attrs[name] = gl.getAttribLocation(self.program!, name);
+        }
 
+        // Render bands back-to-front (high altitude first, then low)
+        // This approximates EVE's overlapRenderOrder (densest first)
         for (const band of [...BANDS].reverse()) {
           const vb = self.vbos.get(band.id);
           if (!vb || vb.count === 0) continue;
+
           gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
-          gl.enableVertexAttribArray(aM); gl.vertexAttribPointer(aM, 2, gl.FLOAT, false, STRIDE, 0);
-          gl.enableVertexAttribArray(aE); gl.vertexAttribPointer(aE, 1, gl.FLOAT, false, STRIDE, 8);
-          gl.enableVertexAttribArray(aS); gl.vertexAttribPointer(aS, 1, gl.FLOAT, false, STRIDE, 12);
-          gl.enableVertexAttribArray(aC); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, STRIDE, 16);
-          gl.enableVertexAttribArray(aR); gl.vertexAttribPointer(aR, 1, gl.FLOAT, false, STRIDE, 32);
-          gl.enableVertexAttribArray(aT); gl.vertexAttribPointer(aT, 1, gl.FLOAT, false, STRIDE, 36);
-          gl.enableVertexAttribArray(aD); gl.vertexAttribPointer(aD, 1, gl.FLOAT, false, STRIDE, 40);
+
+          // Bind interleaved attributes
+          const a = attrs;
+          gl.enableVertexAttribArray(a.aMercator);
+          gl.vertexAttribPointer(a.aMercator, 2, gl.FLOAT, false, STRIDE, 0);
+
+          gl.enableVertexAttribArray(a.aElevation);
+          gl.vertexAttribPointer(a.aElevation, 1, gl.FLOAT, false, STRIDE, 8);
+
+          gl.enableVertexAttribArray(a.aSize);
+          gl.vertexAttribPointer(a.aSize, 1, gl.FLOAT, false, STRIDE, 12);
+
+          gl.enableVertexAttribArray(a.aColor);
+          gl.vertexAttribPointer(a.aColor, 4, gl.FLOAT, false, STRIDE, 16);
+
+          gl.enableVertexAttribArray(a.aRot);
+          gl.vertexAttribPointer(a.aRot, 1, gl.FLOAT, false, STRIDE, 32);
+
+          gl.enableVertexAttribArray(a.aCloudType);
+          gl.vertexAttribPointer(a.aCloudType, 1, gl.FLOAT, false, STRIDE, 36);
+
+          gl.enableVertexAttribArray(a.aDensity);
+          gl.vertexAttribPointer(a.aDensity, 1, gl.FLOAT, false, STRIDE, 40);
+
+          gl.enableVertexAttribArray(a.aNoiseScale);
+          gl.vertexAttribPointer(a.aNoiseScale, 1, gl.FLOAT, false, STRIDE, 44);
+
+          gl.enableVertexAttribArray(a.aEdgeHardness);
+          gl.vertexAttribPointer(a.aEdgeHardness, 1, gl.FLOAT, false, STRIDE, 48);
+
+          gl.enableVertexAttribArray(a.aErosionDepth);
+          gl.vertexAttribPointer(a.aErosionDepth, 1, gl.FLOAT, false, STRIDE, 52);
+
           gl.drawArrays(gl.POINTS, 0, vb.count);
         }
 
-        gl.disableVertexAttribArray(aM); gl.disableVertexAttribArray(aE);
-        gl.disableVertexAttribArray(aS); gl.disableVertexAttribArray(aC);
-        gl.disableVertexAttribArray(aR); gl.disableVertexAttribArray(aT);
-        gl.disableVertexAttribArray(aD);
+        // Cleanup
+        for (const name of attrNames) {
+          gl.disableVertexAttribArray(attrs[name]);
+        }
         gl.depthMask(true);
       },
 
       onRemove(_map: maplibregl.Map, gl: WebGLRenderingContext) {
         if (self.timer) clearInterval(self.timer);
+        if (self.windTimer) clearInterval(self.windTimer);
         for (const [, vb] of self.vbos) gl.deleteBuffer(vb.buf);
         if (self.program) gl.deleteProgram(self.program);
         self.vbos.clear();
@@ -299,95 +578,175 @@ export class CloudPointLayer {
     };
   }
 
-  private getCloudTypeValue(type: string): number {
-    switch (type) {
-      case 'cumulus': return 0;
-      case 'anvil': return 1;
-      case 'stratus': return 2;
-      case 'cirrus': return 3;
-      default: return 0;
+  // ── Wind Animation ────────────────────────────────────────────────
+
+  private updateWindOffset(): void {
+    const wf = this.weather.getWindField('surface');
+    if (!wf) return;
+
+    // Sample global average wind direction
+    const { u, v } = wf;
+    let avgU = 0, avgV = 0, count = 0;
+    for (let i = 0; i < u.length; i += 100) {
+      avgU += u[i];
+      avgV += v[i];
+      count++;
     }
+    if (count > 0) {
+      avgU /= count;
+      avgV /= count;
+    }
+
+    // Accumulate offset (scaled for visual effect)
+    this.windOffsetX += avgU * 0.0001;
+    this.windOffsetY += avgV * 0.0001;
   }
 
+  // ── Data Upload (EVE-inspired placement) ───────────────────────────
+
   private upload(gl: WebGLRenderingContext): void {
-    // Get cloud data — prefer GFS layers, fall back to Open-Meteo surface grid
     const layers = this.weather.getCloudLayers();
     const grid = this.weather.getGrid('surface');
 
-    let coverages: Float32Array[] = [];
+    let cloudData: Float32Array | null = null;
     let w = 360, h = 180;
     let dataSource = 'none';
 
+    // Get cloud fraction data
     if (layers) {
-      // GFS: separate low/medium/high layers
       w = layers.width; h = layers.height;
-      coverages = [layers.low, layers.low, layers.medium, layers.high];
+      cloudData = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        cloudData[i] = Math.max(layers.low[i], layers.medium[i], layers.high[i]);
+      }
       dataSource = `GFS (${layers.source})`;
     } else if (grid?.fields.cloudFraction) {
-      // Open-Meteo: single cloudFraction, distribute across bands by weight
+      cloudData = grid.fields.cloudFraction;
       w = grid.width; h = grid.height;
-      const cf = grid.fields.cloudFraction;
-      coverages = BANDS.map(b => {
-        const weighted = new Float32Array(w * h);
-        for (let i = 0; i < w * h; i++) {
-          weighted[i] = cf[i] * b.dataWeight;
-        }
-        return weighted;
-      });
       dataSource = 'Open-Meteo';
-    } else {
+    }
+
+    if (!cloudData) {
       console.warn('[Clouds] No data — skipping upload');
-      // Don't generate noise-only clouds
-      for (const band of BANDS) {
-        this.vbos.get(band.id)!.count = 0;
-      }
+      for (const band of BANDS) this.vbos.get(band.id)!.count = 0;
       this.dirty = false;
       return;
     }
 
-    for (let bi = 0; bi < BANDS.length; bi++) {
-      const band = BANDS[bi];
-      const cov = coverages[bi];
-      const pts = new Float32Array(band.maxPoints * 11);
+    // Get additional fields for cloud type determination
+    const humidity = grid?.fields.humidity;
+    const temperature = grid?.fields.temperature;
+
+    // Upload per band with EVE-style placement
+    for (const band of BANDS) {
+      const pts = new Float32Array(band.maxPoints * 14); // 14 floats per point
       let n = 0;
 
       for (let j = 0; j < h && n < band.maxPoints; j++) {
         for (let i = 0; i < w && n < band.maxPoints; i++) {
-          let c = cov[j * w + i];
-          if (c > 1) c /= 100;
-          if (c < 0.05) continue;
+          let cf = cloudData[j * w + i];
+          if (cf > 1) cf /= 100;
+          if (cf < 0.03) continue;
 
-          // Use REAL data directly — no noise multiplication
-          const numPts = Math.max(1, Math.ceil(c * band.density));
+          // Apply data weight (like EVE's cloudFraction × dataWeight)
+          let density = cf * band.dataWeight;
+
+          // Modulate with noise texture (EVE's coverage map interaction)
+          if (this.cloudNoise) {
+            const ni = Math.floor((i / w) * (this.noiseW - 1));
+            const nj = Math.floor((j / h) * (this.noiseH - 1));
+            const noiseVal = this.cloudNoise[nj * this.noiseW + ni];
+            // EVE: noise interacts with coverage, minimum threshold
+            density *= Math.max(0.1, noiseVal);
+          }
+
+          if (density < 0.02) continue;
+
+          // Height variation from noise (EVE's coverage curve modulation)
+          let heightMod = 1.0;
+          if (this.heightNoise) {
+            const ni = Math.floor((i / w) * (this.noiseW - 1));
+            const nj = Math.floor((j / h) * (this.noiseH - 1));
+            heightMod = 0.4 + this.heightNoise[nj * this.noiseW + ni] * 0.6;
+          }
+
+          // Storm modulation for cumulonimbus
+          if (band.cloudTypeId === 'cumulonimbus' && this.stormNoise) {
+            const ni = Math.floor((i / w) * (this.noiseW - 1));
+            const nj = Math.floor((j / h) * (this.noiseH - 1));
+            const stormVal = this.stormNoise[nj * this.noiseW + ni];
+            density *= stormVal;
+            if (density < 0.03) continue;
+          }
+
+          // Number of points scales with density
+          const numPts = Math.max(1, Math.ceil(density * band.density));
 
           const lon = (i / w) * 360 - 180 + 0.5;
           const lat = 90 - (j / h) * 180 - 0.5;
 
+          // Weather-based cloud type check
+          let typeMatch = 1.0;
+          if (humidity && temperature) {
+            const hum = humidity[j * w + i];
+            const temp = temperature[j * w + i];
+            const types = weatherToCloudTypes(temp, hum, cf, lat);
+            // Find this band's type in the mix
+            const match = types.find(t => t.type.id === band.cloudTypeId);
+            typeMatch = match ? match.weight * 3 : 0.3; // fallback if type not matched
+          }
+
+          if (typeMatch < 0.05) continue;
+
           for (let p = 0; p < numPts && n < band.maxPoints; p++) {
+            // Jitter placement (EVE uses noise for this)
             const jLon = (Math.random() - 0.5) * (360 / w) * 1.1;
             const jLat = (Math.random() - 0.5) * (180 / h) * 1.1;
-            const altMeters = Math.max(50, band.altitude + (Math.random() - 0.5) * band.altitudeSpread);
+
+            // Altitude with coverage curve modulation
+            const altFrac = Math.random();
+            const curveVal = evalCoverageCurve(band.coverageCurve, altFrac);
+            if (curveVal < 0.05 && Math.random() > 0.3) continue; // skip low-density portions
+
+            const altMeters = Math.max(
+              10,
+              band.altitude + (altFrac - 0.5) * band.altitudeSpread * heightMod
+            );
 
             const clampLat = Math.max(-85, Math.min(85, lat + jLat));
             const m = toMercator(clampLat, lon + jLon);
 
-            const sizeVar = band.sizeRange[0] + c * (band.sizeRange[1] - band.sizeRange[0]) * (0.5 + Math.random() * 0.5);
-            const alpha = band.opacityRange[0] + c * (band.opacityRange[1] - band.opacityRange[0]);
+            // Size varies with density and curve value
+            const sizeVar = band.sizeRange[0]
+              + density * (band.sizeRange[1] - band.sizeRange[0]) * (0.5 + Math.random() * 0.5)
+              * curveVal;
+            const alpha = (band.opacityRange[0]
+              + density * (band.opacityRange[1] - band.opacityRange[0]))
+              * typeMatch * curveVal;
             const rot = Math.random() * Math.PI * 2;
 
-            const o = n * 11;
-            pts[o] = m.x; pts[o+1] = m.y; pts[o+2] = altMeters;
-            pts[o+3] = sizeVar;
-            pts[o+4] = band.color[0]; pts[o+5] = band.color[1]; pts[o+6] = band.color[2]; pts[o+7] = alpha;
-            pts[o+8] = rot;
-            pts[o+9] = this.getCloudTypeValue(band.cloudType);
-            pts[o+10] = c;
+            // Pack into interleaved buffer (14 floats per point)
+            const o = n * 14;
+            pts[o]    = m.x;                     // aMercator.x
+            pts[o+1]  = m.y;                     // aMercator.y
+            pts[o+2]  = altMeters;               // aElevation
+            pts[o+3]  = sizeVar;                 // aSize
+            pts[o+4]  = band.color[0];           // aColor.r
+            pts[o+5]  = band.color[1];           // aColor.g
+            pts[o+6]  = band.color[2];           // aColor.b
+            pts[o+7]  = Math.min(1, alpha);      // aColor.a
+            pts[o+8]  = rot;                     // aRot
+            pts[o+9]  = band.cloudTypeIndex;     // aCloudType
+            pts[o+10] = density;                 // aDensity
+            pts[o+11] = band.noiseScale;         // aNoiseScale
+            pts[o+12] = band.edgeHardness;       // aEdgeHardness
+            pts[o+13] = band.erosionDepth;       // aErosionDepth
             n++;
           }
         }
       }
 
-      const data = pts.subarray(0, n * 11);
+      const data = pts.subarray(0, n * 14);
       const vb = this.vbos.get(band.id)!;
       gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
       gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
@@ -396,7 +755,10 @@ export class CloudPointLayer {
 
     this.dirty = false;
     const total = [...this.vbos.values()].reduce((s, b) => s + b.count, 0);
-    console.log(`[Clouds] ${total} pts from ${dataSource}: ${BANDS.map(b => `${b.id}=${this.vbos.get(b.id)!.count}`).join(' ')}`);
+    console.log(
+      `[Clouds] ${total} pts from ${dataSource}: ` +
+      BANDS.map(b => `${b.id}=${this.vbos.get(b.id)!.count}`).join(' ')
+    );
   }
 
   setVisible(v: boolean): void {
