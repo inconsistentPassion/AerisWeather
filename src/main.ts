@@ -2,20 +2,22 @@
  * AerisWeather — Main Entry Point
  * "Windy meets MSFS, but in the browser."
  *
- * MapLibre GL JS  → globe, tiles, zoom, camera, atmosphere
- * Custom layers   → wind particles, radar, rain, atmosphere glow
+ * MapLibre GL JS  → globe, tiles, zoom, camera
+ * deck.gl         → clouds (point cloud), wind (lines), rain (lines)
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
+import { MapboxOverlay } from '@deck.gl/mapbox';
 import { createUI } from './ui/UI';
 import { WeatherManager } from './weather/WeatherManager';
 import { WindParticleLayer } from './weather/WindParticleLayer';
 import { RadarLayer } from './clouds/RadarLayer';
 import { RainEffect } from './clouds/RainEffect';
-import { createAtmosphereLayer } from './scene/AtmosphereLayer';
+import { CloudPointLayer } from './clouds/CloudPointLayer';
+import { DeckLayerManager } from './clouds/DeckLayerManager';
 
-// ── Mapbox-inspired dark style with enhanced terrain ────────────────
+// ── Dark style ────────────────────────────────────────────────────────
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 
 async function init() {
@@ -44,7 +46,6 @@ async function init() {
     pitchWithRotate: true,
     touchZoomRotate: true,
     transformRequest: (url, resourceType) => {
-      // Cap RainViewer tile requests at z8
       if (resourceType === 'Tile' && url.includes('rainviewer.com')) {
         const match = url.match(/\/(\d+)\/(\d+)\/(\d+)\.png/);
         if (match) {
@@ -55,8 +56,7 @@ async function init() {
             const scale = 1 << (z - 8);
             const cx = Math.floor(x / scale);
             const cy = Math.floor(y / scale);
-            const capped = url.replace(`/${z}/${x}/${y}.png`, `/8/${cx}/${cy}.png`);
-            return { url: capped };
+            return { url: url.replace(`/${z}/${x}/${y}.png`, `/8/${cx}/${cy}.png`) };
           }
         }
       }
@@ -66,44 +66,14 @@ async function init() {
 
   // Globe projection
   map.on('style.load', () => {
-    try {
-      (map as any).setProjection({ type: 'globe' });
-    } catch (e) {
-      console.warn('setProjection failed:', e);
-    }
+    try { (map as any).setProjection({ type: 'globe' }); }
+    catch (e) { console.warn('setProjection failed:', e); }
   });
 
   // ── Wait for map ───────────────────────────────────────────────────
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Sky + atmosphere (MapLibre v5 API) ─────────────────────────────
-  try {
-    (map as any).setSky({
-      'sky-color': '#1a2a4a',
-      'sky-horizon-blend': 0.5,
-      'atmosphere-blend': [
-        'interpolate', ['linear'], ['zoom'],
-        0, 1,
-        5, 0.5,
-        8, 0,
-      ],
-      // fog-* properties omitted — calculateFogMatrix unsupported on globe
-    });
-    console.log('[Sky] Atmosphere enabled');
-  } catch (e) {
-    console.warn('[Sky] Failed:', e);
-  }
-
-  // ── Custom atmosphere layer (Rayleigh scattering) ──────────────────
-  try {
-    const atmosphereLayer = createAtmosphereLayer();
-    map.addLayer(atmosphereLayer);
-    console.log('[Atmosphere] Rayleigh scattering layer added');
-  } catch (e) {
-    console.warn('[Atmosphere] Layer failed:', e);
-  }
-
-  // ── 3D Terrain + hillshade (single shared DEM source) ──────────────
+  // ── 3D Terrain + hillshade ─────────────────────────────────────────
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -112,7 +82,6 @@ async function init() {
       encoding: 'terrarium',
     });
     map.setTerrain({ source: 'terrain-dem', exaggeration: 1.8 });
-    console.log('[Terrain] 3D elevation enabled');
 
     map.addLayer({
       id: 'hillshade-layer',
@@ -126,29 +95,34 @@ async function init() {
         'hillshade-accent-color': 'rgba(15, 20, 35, 0.5)',
       },
     });
-    console.log('[Hillshade] Terrain relief shading enabled');
+    console.log('[Terrain] 3D elevation enabled');
   } catch (e) {
     console.warn('[Terrain] Failed:', e);
   }
 
-  // ── Suppress non-critical errors ─────────────────────────────────────
+  // ── Suppress non-critical errors ───────────────────────────────────
   map.on('error', (e) => {
     const msg = e.error?.message || e.error?.toString() || '';
     if (msg.includes('rainviewer') || msg.includes('zoom level') ||
-        msg.includes('404') || msg.includes('not supported') ||
-        msg.includes('calculateFogMatrix') || msg.includes('fogMatrix')) {
-      return; // Globe projection doesn't support fog — expected
-    }
+        msg.includes('404') || msg.includes('not supported')) return;
     console.error('MapLibre error:', e);
   });
 
+  // ── Shared deck.gl overlay ─────────────────────────────────────────
+  const deckOverlay = new MapboxOverlay({ interleaved: true, layers: [] });
+  (map as any).addControl(deckOverlay);
+  const deckManager = new DeckLayerManager(deckOverlay);
+
   // ── Weather layers ─────────────────────────────────────────────────
-  const windParticles = new WindParticleLayer(map, weather);
+  const windParticles = new WindParticleLayer(map, weather, deckManager);
   const radarLayer = new RadarLayer(map, weather);
-  const rainEffect = new RainEffect(map);
+  const rainEffect = new RainEffect(map, deckManager);
+  const cloudPointLayer = new CloudPointLayer(weather, deckManager);
 
   radarLayer.setVisible(true);
   rainEffect.setVisible(true);
+  cloudPointLayer.setVisible(true);
+  windParticles.setVisible(true);
 
   // ── UI ─────────────────────────────────────────────────────────────
   const ui = createUI(uiContainer, weather, {
@@ -164,6 +138,9 @@ async function init() {
         case 'radar':
           radarLayer.setVisible(active);
           rainEffect.setVisible(active);
+          break;
+        case 'clouds':
+          cloudPointLayer.setVisible(active);
           break;
       }
     },
@@ -188,20 +165,8 @@ async function init() {
       case 'KeyR':
         map.flyTo({ center: [0, 20], zoom: 1.8, pitch: 52, bearing: -20, duration: 1500 });
         break;
-      case 'Digit1':
-        document.getElementById('btn-wind')?.click();
-        break;
-      case 'Digit2':
-        document.getElementById('btn-radar')?.click();
-        break;
-      case 'Digit3':
-        document.getElementById('btn-temp')?.click();
-        break;
-      case 'Digit4':
-        document.getElementById('btn-pressure')?.click();
-        break;
-      case 'Digit5':
-        document.getElementById('btn-humidity')?.click();
+      case 'Digit6':
+        document.querySelector('[data-layer="clouds"]')?.dispatchEvent(new Event('click'));
         break;
       case 'Equal':
       case 'NumpadAdd':

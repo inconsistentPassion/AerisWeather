@@ -1,116 +1,111 @@
 /**
- * Weather API routes — Proxy and normalize data from external sources.
- * Uses GFS adapter with disk cache, falls back to procedural generation.
+ * Weather API routes — GFS cloud layers + procedural fallback.
  */
 
 import { Router } from 'express';
-import { generateWeatherGrid } from '../normalize/grid';
-import { gfsAdapter } from '../sources/gfs';
+import { generateWeatherGrid, generateCloudLayers } from '../normalize/grid';
+import { fetchGFSData, getCurrentCycle, resampleGrid } from '../sources/gfs';
 import { weatherCache } from '../cache/disk';
 
 export const weatherRouter = Router();
 
+const GRID_W = 360;
+const GRID_H = 180;
+
 /**
- * GET /api/weather/grid?level=surface&time=2026-04-18T00:00:00Z
- * Returns normalized gridded weather data.
+ * GET /api/weather/grid?level=surface&time=...
+ * Single-level weather grid (backward compatible).
  */
 weatherRouter.get('/grid', async (req, res) => {
   const level = (req.query.level as string) || 'surface';
   const time = (req.query.time as string) || new Date().toISOString();
-  const width = parseInt(req.query.width as string) || 360;
-  const height = parseInt(req.query.height as string) || 180;
+  const width = parseInt(req.query.width as string) || GRID_W;
+  const height = parseInt(req.query.height as string) || GRID_H;
 
-  // Check cache
   const cacheKey = `grid_${level}_${time}_${width}x${height}`;
   const cached = weatherCache.get(cacheKey);
-  if (cached) {
-    return res.json(cached);
-  }
+  if (cached) return res.json(cached);
 
-  try {
-    // Try GFS first
-    const cycle = gfsAdapter.getCurrentCycle();
-    const targetDate = new Date(time);
-    const now = new Date();
-    const fhour = Math.max(0, Math.round((targetDate.getTime() - now.getTime()) / 3600000) + 3);
-    
-    const gfsGrid = await gfsAdapter.fetchData(cycle, Math.min(fhour, 384), ['TMP', 'UGRD', 'VGRD', 'RH', 'TCDC'], level);
-    
-    if (gfsGrid) {
-      // Use real GFS data
-      const grid = normalizeGFSGrid(gfsGrid, width, height, level, time);
-      weatherCache.set(cacheKey, grid);
-      return res.json(grid);
-    }
-  } catch (err) {
-    console.warn(`[WeatherAPI] GFS fetch failed, using procedural: ${(err as Error).message}`);
-  }
-
-  // Fallback to procedural generation
   const grid = generateWeatherGrid(level, time, width, height);
   weatherCache.set(cacheKey, grid);
   res.json(grid);
 });
 
 /**
- * GET /api/weather/forecast?level=surface&hours=120
- * Returns time-series of forecast grids.
+ * GET /api/weather/cloud-layers?time=...
+ * Returns 3 cloud layers (low/mid/high) from GFS or procedural fallback.
  */
-weatherRouter.get('/forecast', async (req, res) => {
-  const level = (req.query.level as string) || 'surface';
-  const hours = parseInt((req.query.hours as string) || '120');
-  const now = new Date();
+weatherRouter.get('/cloud-layers', async (req, res) => {
+  const time = (req.query.time as string) || new Date().toISOString();
+  const width = parseInt(req.query.width as string) || GRID_W;
+  const height = parseInt(req.query.height as string) || GRID_H;
 
-  const steps = [];
-  for (let h = 0; h <= hours; h += 3) {
-    const t = new Date(now.getTime() + h * 3600000);
-    steps.push({
-      time: t.toISOString(),
-      offset_hours: h,
-      data_url: `/api/weather/grid?level=${level}&time=${t.toISOString()}`,
-    });
+  const cacheKey = `cloud-layers_${time}_${width}x${height}`;
+  const cached = weatherCache.get(cacheKey);
+  if (cached) return res.json(cached);
+
+  // Try GFS
+  try {
+    const cycle = getCurrentCycle();
+    const now = Date.now();
+    const targetTime = new Date(time).getTime();
+    let fhour = Math.round((targetTime - now) / 3600000) + 3;
+    fhour = Math.max(0, Math.min(fhour, 384));
+
+    // Round to nearest 3-hour step
+    fhour = Math.round(fhour / 3) * 3;
+
+    const gfsData = await fetchGFSData(cycle, fhour);
+
+    if (gfsData) {
+      // Resample GFS 0.25° grid (1440×721) to target resolution
+      const result = {
+        source: 'GFS',
+        cycle: gfsData.cycle,
+        forecastHour: gfsData.forecastHour,
+        width,
+        height,
+        low: Array.from(resampleGrid(gfsData.low.data, gfsData.low.width, gfsData.low.height, width, height)),
+        medium: Array.from(resampleGrid(gfsData.medium.data, gfsData.medium.width, gfsData.medium.height, width, height)),
+        high: Array.from(resampleGrid(gfsData.high.data, gfsData.high.width, gfsData.high.height, width, height)),
+        windU: Array.from(resampleGrid(gfsData.windU, 1440, 721, width, height)),
+        windV: Array.from(resampleGrid(gfsData.windV, 1440, 721, width, height)),
+      };
+
+      weatherCache.set(cacheKey, result);
+      console.log(`[Weather] Cloud layers from GFS ${cycle.date}/${cycle.hour}+${fhour}h`);
+      return res.json(result);
+    }
+  } catch (err) {
+    console.warn(`[Weather] GFS cloud layers failed: ${(err as Error).message}`);
   }
 
-  res.json({ level, hours, steps });
+  // Procedural fallback
+  const layers = generateCloudLayers(time, width, height);
+  layers.source = 'procedural';
+  weatherCache.set(cacheKey, layers);
+  res.json(layers);
 });
 
 /**
  * GET /api/weather/cycle
- * Returns current GFS cycle info.
  */
 weatherRouter.get('/cycle', (_req, res) => {
-  const cycle = gfsAdapter.getCurrentCycle();
-  res.json({
-    cycle,
-    variables: gfsAdapter.getAvailableVariables(),
-    levels: gfsAdapter.getAvailableLevels(),
-  });
+  const cycle = getCurrentCycle();
+  res.json({ cycle });
 });
 
 /**
  * GET /api/weather/cache/stats
- * Returns cache statistics.
  */
 weatherRouter.get('/cache/stats', (_req, res) => {
-  res.json({
-    sizeMB: weatherCache.getSizeMB(),
-  });
+  res.json({ sizeMB: weatherCache.getSizeMB() });
 });
 
 /**
  * POST /api/weather/cache/clear
- * Clears weather cache.
  */
 weatherRouter.post('/cache/clear', (_req, res) => {
   weatherCache.clear();
   res.json({ status: 'cleared' });
 });
-
-/**
- * Normalize a GFS grid to the expected format.
- */
-function normalizeGFSGrid(gfsGrid: any, width: number, height: number, level: string, time: string) {
-  // Convert GFS data to our internal format
-  // This would be more sophisticated with real GFS data
-  return generateWeatherGrid(level, time, width, height);
-}

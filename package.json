@@ -10,9 +10,13 @@
     "server": "tsx watch server/index.ts"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.3.1",
+    "@deck.gl/layers": "^9.3.1",
+    "@deck.gl/mapbox": "^9.3.1",
     "@types/geojson": "^7946.0.16",
     "@types/ws": "^8.18.1",
     "cors": "^2.8.5",
+    "deck.gl": "^9.3.1",
     "express": "^4.21.0",
     "ioredis": "^5.4.1",
     "maplibre-gl": "^5.23.0",

@@ -78,7 +78,7 @@ export function setupWebSocket(server: any): WebSocketServer {
           width: grid.width,
           height: grid.height,
           // Send compressed fields
-          cloudCoverage: compressField(grid.cloudCoverage, 180, 90),
+          cloudCoverage: compressFlatField(grid.fields.cloudFraction ?? new Float32Array(180 * 90), 180, 90),
         },
       };
 
@@ -97,6 +97,16 @@ export function setupWebSocket(server: any): WebSocketServer {
     for (let y = 0; y < height; y += 2) {
       for (let x = 0; x < width; x += 2) {
         result.push(field[y]?.[x] ?? 0);
+      }
+    }
+    return result;
+  }
+
+  function compressFlatField(field: Float32Array, width: number, height: number): number[] {
+    const result: number[] = [];
+    for (let y = 0; y < height; y += 2) {
+      for (let x = 0; x < width; x += 2) {
+        result.push(field[y * width + x] ?? 0);
       }
     }
     return result;
