@@ -1,15 +1,12 @@
 /**
- * NASA POWER data source adapter — fallback cloud data.
+ * NASA POWER data source adapter — fallback cloud optical depth.
  *
- * Endpoints (no API key required):
- *   Daily:   CLDLOW, CLDMID, CLDHIGH  → low/mid/high cloud fraction
- *   Hourly:  CLOUD_OD                 → cloud optical depth (CERES SYN1deg, ~1°)
+ * Endpoint (no API key required):
+ *   Hourly: CLOUD_OD → cloud optical depth (CERES SYN1deg, ~1°)
  *
  * Constraints:
- *   - CLDLOW/CLDMID/CLDHIGH are only available at daily resolution.
- *   - CLOUD_OD is available hourly via CERES SYN1deg.
  *   - POWER rejects future dates (returns 422).
- *   - Native resolution is ~1° (we interpolate to requested point).
+ *   - Native resolution is ~1°.
  *
  * Docs: https://power.larc.nasa.gov/docs/services/api/
  */
@@ -17,7 +14,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const DAILY_BASE = 'https://power.larc.nasa.gov/api/temporal/daily/point';
 const HOURLY_BASE = 'https://power.larc.nasa.gov/api/temporal/hourly/point';
 
 const CACHE_DIR = path.join(process.cwd(), 'cache', 'power');
@@ -26,72 +22,14 @@ const CACHE_TTL = 3600; // 1 hour
 export interface POWERCloudData {
   source: 'POWER';
   time: string;
-  levels: string[];              // ["low", "mid", "high"]
-  cloud_fraction: number[];      // per level (0-1)
+  levels: string[];
+  cloud_fraction: null;
   cloud_water: null;
   cloud_ice: null;
-  optical_depth: number | null;  // CLOUD_OD
+  optical_depth: number | null;
   confidence: 'medium' | 'low';
-  spatial_resolution: string;    // "~1° (CERES SYN1deg)"
-  interpolation: string;         // "nearest-neighbor"
+  spatial_resolution: string;
   debug?: Record<string, unknown>;
-}
-
-/**
- * Fetch daily low/mid/high cloud fractions from NASA POWER.
- */
-async function fetchDailyCloudFractions(
-  lat: number,
-  lon: number,
-  dateStr: string // YYYYMMDD
-): Promise<{ cldLow: number; cldMid: number; cldHigh: number } | null> {
-  const params = new URLSearchParams({
-    parameters: 'CLDLOW,CLDMID,CLDHIGH',
-    community: 'RE',
-    longitude: String(lon),
-    latitude: String(lat),
-    start: dateStr,
-    end: dateStr,
-    format: 'JSON',
-  });
-
-  const url = `${DAILY_BASE}?${params.toString()}`;
-
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
-      headers: { 'User-Agent': 'AerisWeather/0.1.0' },
-    });
-
-    if (res.status === 422) {
-      console.warn('[POWER] Daily request rejected (422) — likely future date');
-      return null;
-    }
-
-    if (!res.ok) {
-      console.warn(`[POWER] Daily HTTP ${res.status}`);
-      return null;
-    }
-
-    const data = await res.json();
-    const params = data?.properties?.parameter;
-    if (!params) return null;
-
-    const getVal = (obj: any): number => {
-      if (!obj) return 0;
-      const val = obj[dateStr];
-      return typeof val === 'number' ? val / 100 : 0; // % → fraction
-    };
-
-    return {
-      cldLow: getVal(params.CLDLOW),
-      cldMid: getVal(params.CLDMID),
-      cldHigh: getVal(params.CLDHIGH),
-    };
-  } catch (err) {
-    console.warn(`[POWER] Daily fetch failed: ${(err as Error).message}`);
-    return null;
-  }
 }
 
 /**
@@ -163,13 +101,12 @@ async function fetchHourlyOpticalDepth(
  */
 function safeDateStr(date: Date): string {
   const now = new Date();
-  // If requested date is in the future, use today
   const safeDate = date.getTime() > now.getTime() ? now : date;
   return safeDate.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
 /**
- * Main fetch function — returns normalized cloud data from NASA POWER.
+ * Main fetch function — returns cloud optical depth from NASA POWER.
  */
 export async function fetchPOWERCloudData(
   lat: number,
@@ -196,32 +133,22 @@ export async function fetchPOWERCloudData(
     } catch {}
   }
 
-  console.log(`[POWER] Fetching cloud data for ${lat}, ${lon} @ ${dateStr}h${hour}`);
+  console.log(`[POWER] Fetching CLOUD_OD for ${lat}, ${lon} @ ${dateStr}h${hour}`);
 
-  // Fetch daily fractions + hourly optical depth in parallel
-  const [dailyResult, opticalDepth] = await Promise.all([
-    fetchDailyCloudFractions(lat, lon, dateStr),
-    fetchHourlyOpticalDepth(lat, lon, dateStr, hour),
-  ]);
-
-  if (!dailyResult) {
-    console.warn('[POWER] No daily cloud data available');
-    return null;
-  }
+  const opticalDepth = await fetchHourlyOpticalDepth(lat, lon, dateStr, hour);
 
   const isFutureDate = requestedDate.getTime() > Date.now();
 
   const result: POWERCloudData = {
     source: 'POWER',
     time: `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}T${String(hour).padStart(2, '0')}:00:00Z`,
-    levels: ['low', 'mid', 'high'],
-    cloud_fraction: [dailyResult.cldLow, dailyResult.cldMid, dailyResult.cldHigh],
+    levels: [],
+    cloud_fraction: null,
     cloud_water: null,
     cloud_ice: null,
     optical_depth: opticalDepth,
     confidence: isFutureDate ? 'low' : 'medium',
     spatial_resolution: '~1° (CERES SYN1deg)',
-    interpolation: 'nearest-neighbor',
   };
 
   if (debug) {
@@ -229,9 +156,7 @@ export async function fetchPOWERCloudData(
       dateStr,
       hour,
       wasFutureDate: isFutureDate,
-      dailyUrl: `${DAILY_BASE}?parameters=CLDLOW,CLDMID,CLDHIGH&community=RE&longitude=${lon}&latitude=${lat}&start=${dateStr}&end=${dateStr}&format=JSON`,
-      hourlyUrl: `${HOURLY_BASE}?parameters=CLOUD_OD&community=RE&longitude=${lon}&latitude=${lat}&start=${dateStr}&end=${dateStr}&format=JSON`,
-      rawDaily: dailyResult,
+      url: `${HOURLY_BASE}?parameters=CLOUD_OD&community=RE&longitude=${lon}&latitude=${lat}&start=${dateStr}&end=${dateStr}&format=JSON`,
       rawOpticalDepth: opticalDepth,
     };
   }

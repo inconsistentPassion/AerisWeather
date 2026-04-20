@@ -53,12 +53,12 @@ console.log('\n📡 GFS Cycle Detection');
 
 console.log('\n🌍 NASA POWER Response Schema (validation only)');
 {
-  // Validate that our response schema matches the spec
+  // Validate that our response schema matches the spec — POWER only provides CLOUD_OD
   const mockPOWERResponse = {
     source: 'POWER' as const,
     time: '2024-04-19T03:00:00Z',
-    levels: ['low', 'mid', 'high'] as string[],
-    cloud_fraction: [0.45, 0.30, 0.15] as number[],
+    levels: [] as string[],
+    cloud_fraction: null,
     cloud_water: null,
     cloud_ice: null,
     optical_depth: 2.5,
@@ -66,13 +66,11 @@ console.log('\n🌍 NASA POWER Response Schema (validation only)');
   };
 
   assertEqual(mockPOWERResponse.source, 'POWER', 'Source is POWER');
-  assertEqual(mockPOWERResponse.levels.length, 3, 'Three levels');
-  assertEqual(mockPOWERResponse.cloud_fraction.length, 3, 'Three cloud fractions');
+  assertEqual(mockPOWERResponse.levels.length, 0, 'No levels from POWER (CLOUD_OD only)');
+  assert(mockPOWERResponse.cloud_fraction === null, 'cloud_fraction is null for POWER');
   assert(mockPOWERResponse.cloud_water === null, 'cloud_water is null for POWER');
   assert(mockPOWERResponse.cloud_ice === null, 'cloud_ice is null for POWER');
-  assertRange(mockPOWERResponse.cloud_fraction[0], 0, 1, 'Low cloud fraction in range');
-  assertRange(mockPOWERResponse.cloud_fraction[1], 0, 1, 'Mid cloud fraction in range');
-  assertRange(mockPOWERResponse.cloud_fraction[2], 0, 1, 'High cloud fraction in range');
+  assert(mockPOWERResponse.optical_depth !== null, 'POWER has optical_depth');
 }
 
 // ── Test: GFS response schema ─────────────────────────────────────────
@@ -184,23 +182,20 @@ console.log('\n🎯 Confidence Levels');
 
 // ── Test: POWER API URL construction ──────────────────────────────────
 
-console.log('\n🔗 POWER API URLs');
+console.log('\n🔗 POWER API URL');
 {
   const lat = 37.7749;
   const lon = -122.4194;
   const dateStr = '20260420';
 
-  const dailyUrl = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=CLDLOW,CLDMID,CLDHIGH&community=RE&longitude=${lon}&latitude=${lat}&start=${dateStr}&end=${dateStr}&format=JSON`;
   const hourlyUrl = `https://power.larc.nasa.gov/api/temporal/hourly/point?parameters=CLOUD_OD&community=RE&longitude=${lon}&latitude=${lat}&start=${dateStr}&end=${dateStr}&format=JSON`;
-
-  assert(dailyUrl.includes('CLDLOW,CLDMID,CLDHIGH'), 'Daily URL has cloud layer params');
-  assert(dailyUrl.includes('temporal/daily/point'), 'Daily URL uses daily endpoint');
-  assert(dailyUrl.includes(`latitude=${lat}`), 'Daily URL has latitude');
-  assert(dailyUrl.includes(`longitude=${lon}`), 'Daily URL has longitude');
-  assert(dailyUrl.includes('format=JSON'), 'Daily URL requests JSON');
 
   assert(hourlyUrl.includes('CLOUD_OD'), 'Hourly URL has optical depth param');
   assert(hourlyUrl.includes('temporal/hourly/point'), 'Hourly URL uses hourly endpoint');
+  assert(hourlyUrl.includes(`latitude=${lat}`), 'Hourly URL has latitude');
+  assert(hourlyUrl.includes(`longitude=${lon}`), 'Hourly URL has longitude');
+  assert(hourlyUrl.includes('format=JSON'), 'Hourly URL requests JSON');
+  assert(!hourlyUrl.includes('CLDLOW'), 'No daily cloud layer params');
 }
 
 // ── Test: Response schema matches spec ────────────────────────────────
@@ -219,12 +214,12 @@ console.log('\n📋 Response Schema Compliance');
     confidence: 'string',
   };
 
-  // POWER schema
+  // POWER schema (CLOUD_OD only — no layer fractions)
   const powerSchema = {
     source: 'string',
     time: 'string',
     levels: 'string[]',
-    cloud_fraction: 'number[]',
+    cloud_fraction: 'null',
     cloud_water: 'null',
     cloud_ice: 'null',
     optical_depth: 'number|null',
@@ -240,6 +235,7 @@ console.log('\n📋 Response Schema Compliance');
 
   assertEqual(gfsSchema.source, 'string', 'GFS source type');
   assertEqual(powerSchema.source, 'string', 'POWER source type');
+  assertEqual(powerSchema.cloud_fraction, 'null', 'POWER cloud_fraction is null (CLOUD_OD only)');
 }
 
 // ── Summary ───────────────────────────────────────────────────────────

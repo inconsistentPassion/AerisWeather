@@ -141,7 +141,6 @@ cloudRouter.get('/clouds', async (req: Request, res: Response) => {
         optical_depth: powerData.optical_depth,
         confidence: powerData.confidence,
         spatial_resolution: powerData.spatial_resolution,
-        interpolation: powerData.interpolation,
         fallback_reason: gfsError,
         ...(debug ? { debug: powerData.debug } : {}),
       };

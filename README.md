@@ -94,14 +94,13 @@ curl "http://localhost:3001/api/weather/clouds?lat=37.77&lon=-122.42&time=2024-0
 {
   "source": "POWER",
   "time": "2024-04-19T03:00:00Z",
-  "levels": ["low", "mid", "high"],
-  "cloud_fraction": [0.45, 0.30, 0.15],
+  "levels": [],
+  "cloud_fraction": null,
   "cloud_water": null,
   "cloud_ice": null,
   "optical_depth": 2.5,
   "confidence": "medium",
-  "spatial_resolution": "~1° (CERES SYN1deg)",
-  "interpolation": "nearest-neighbor"
+  "spatial_resolution": "~1° (CERES SYN1deg)"
 }
 ```
 
@@ -123,8 +122,8 @@ GET /api/tiles/:field/:z/:x/:y.png?level=...         # Weather tiles
 
 ### POWER Constraints
 
-- **CLDLOW/CLDMID/CLDHIGH** — daily resolution only (the endpoint uses `temporal=daily`)
-- **CLOUD_OD** — hourly via CERES SYN1deg (~1° native resolution)
+- **CLOUD_OD only** — POWER fallback provides cloud optical depth via hourly CERES SYN1deg (~1° resolution)
+- **No layer fractions** — CLDLOW/CLDMID/CLDHIGH are daily-only and not used; GFS is the source for per-level cloud fraction
 - **Future dates** — POWER returns HTTP 422; the server detects this and reports accordingly
 - **No API key** — both GFS (AWS Open Data) and POWER are free
 
