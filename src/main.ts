@@ -98,7 +98,36 @@ async function init() {
   map.addLayer(rainEffect.getLayer());
   rainEffect.setVisible(true);
 
-  // ── Live cloud coverage (EUMETSAT via live-cloud-maps) ───────────
+  // ── Live cloud texture overlay (global view) ─────────────────────
+  const CLOUD_TEXTURE_URL = 'https://clouds.matteason.co.uk/images/2048x1024/clouds.jpg';
+
+  map.addSource('live-clouds', {
+    type: 'image',
+    url: CLOUD_TEXTURE_URL,
+    coordinates: [
+      [-180, 90],   // top-left
+      [180, 90],    // top-right
+      [180, -90],   // bottom-right
+      [-180, -90],  // bottom-left
+    ],
+  } as any);
+
+  map.addLayer({
+    id: 'live-cloud-layer',
+    type: 'raster',
+    source: 'live-clouds',
+    paint: {
+      'raster-opacity': 0.45,
+      'raster-resampling': 'linear',
+      'raster-saturation': -1.0,  // desaturate to grey
+    },
+  });
+
+  function setCloudOverlayVisible(visible: boolean): void {
+    try {
+      map.setLayoutProperty('live-cloud-layer', 'visibility', visible ? 'visible' : 'none');
+    } catch {}
+  }
   const liveClouds = new LiveCloudMap();
 
   // Feed coverage into cloud layer
@@ -261,9 +290,12 @@ async function init() {
     if (!city) {
       cityInfo.style.display = 'none';
       deckLayers.focusCity(null);
+      setCloudOverlayVisible(true);  // show texture in global view
       map.flyTo({ center: [0, 20], zoom: 2, pitch: 0, duration: 1500 });
       return;
     }
+
+    setCloudOverlayVisible(false);  // hide texture when focusing on city
 
     map.flyTo({
       center: [city.lon, city.lat],
