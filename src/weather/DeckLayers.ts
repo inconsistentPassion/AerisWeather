@@ -15,6 +15,7 @@ import { MapboxOverlay } from '@deck.gl/mapbox';
 import { PointCloudLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
 import type { WeatherManager } from './WeatherManager';
 import { loadRadarCells, getCachedRadarCells } from './RadarData';
+import { generateCloudNoise, generateHeightNoise } from './CloudNoise';
 import type maplibregl from 'maplibre-gl';
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -163,68 +164,93 @@ export class DeckLayers {
     if (this.animId) cancelAnimationFrame(this.animId);
   }
 
-  // ── Volumetric cloud generation (reference: point-cloud example) ────
+  // ── Volumetric cloud generation (noise-texture driven) ───────────────
+  // Reference: Horizon: Zero Dawn technique
+  // - 2D noise texture defines cloud SHAPE (where clouds are thick/thin)
+  // - 2nd noise texture defines HEIGHT PROFILE (stratus vs cumulus vs cumulonimbus)
+  // - Particles placed only where noise > threshold
+  // - Particle altitude varies per-column based on height noise
 
   private generateVolumetricClouds(city: City): void {
-    const bands: CloudPoint[][] = [];
-    const regionRadius = 0.7; // degrees
-    const gridStep = 0.025;   // ~2.5km grid
+    // Generate noise textures (seeded per-city for variety)
+    const seed = Math.round(city.lon * 7 + city.lat * 13) % 1000;
+    const noiseW = 256, noiseH = 128;
+    const cloudNoise = generateCloudNoise(noiseW, noiseH, seed);
+    const heightNoise = generateHeightNoise(noiseW, noiseH, seed + 33);
 
-    for (let bi = 0; bi < CLOUD_BANDS.length; bi++) {
-      const cfg = CLOUD_BANDS[bi];
-      const density = 1 - bi * 0.1;
-      const points: CloudPoint[] = [];
+    const bands: CloudPoint[][] = CLOUD_BANDS.map(() => []);
+    const regionRadius = 0.6; // degrees around city
+    const gridStep = 0.015;   // ~1.5km grid
 
-      for (let dy = -regionRadius; dy <= regionRadius; dy += gridStep) {
-        for (let dx = -regionRadius; dx <= regionRadius; dx += gridStep) {
-          // Procedural cloud coverage — layered noise
-          const nx = (city.lon + dx) * 3.7;
-          const ny = (city.lat + dy) * 4.1;
-          const coverage =
-            (Math.sin(nx * 1.0 + ny * 0.7) * 0.5 + 0.5) *
-            (Math.sin(nx * 2.3 - ny * 1.9) * 0.5 + 0.5) *
-            (Math.cos(nx * 0.7 + ny * 2.1) * 0.5 + 0.5) *
-            (Math.sin((nx + ny) * 0.5) * 0.3 + 0.7);
+    for (let dy = -regionRadius; dy <= regionRadius; dy += gridStep) {
+      for (let dx = -regionRadius; dx <= regionRadius; dx += gridStep) {
+        // Sample noise texture at this position
+        const nu = (dx / regionRadius + 1) * 0.5; // 0-1
+        const nv = (dy / regionRadius + 1) * 0.5; // 0-1
+        const ni = Math.floor(nu * (noiseW - 1));
+        const nj = Math.floor(nv * (noiseH - 1));
+        const noiseVal = cloudNoise[nj * noiseW + ni];
+        const hVal = heightNoise[nj * noiseW + ni];
 
-          const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
-          const edgeFade = Math.max(0, 1 - dist * dist);
-          const c = coverage * edgeFade * density;
-          if (c < 0.12) continue;
+        if (noiseVal < 0.05) continue; // clear sky
 
-          // Random normal for lighting variation (simulates cloud surface bumps)
-          const normalAngle = Math.random() * Math.PI * 2;
-          const normalTilt = (Math.random() - 0.5) * 0.6;
-          const nx2 = Math.cos(normalAngle) * Math.cos(normalTilt);
-          const ny2 = Math.sin(normalAngle) * Math.cos(normalTilt);
-          const nz = 0.8 + Math.sin(normalTilt) * 0.2; // mostly upward
+        // Height profile: how many bands this column fills
+        // hVal=0 → only low bands; hVal=1 → all bands (tall cumulonimbus)
+        const maxBand = Math.ceil(hVal * CLOUD_BANDS.length);
 
-          const alt = cfg.alt + (Math.random() - 0.5) * cfg.spread;
+        // Edge falloff for region boundary
+        const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
+        const edgeFade = Math.max(0, 1 - dist * dist);
 
-          // Color: brighter in dense center, darker at edges
-          const bright = 0.85 + c * 0.15;
-          const edge = Math.min(1, dist * 1.5);
-          points.push({
-            position: [
-              city.lon + dx + (Math.random() - 0.5) * gridStep,
-              city.lat + dy + (Math.random() - 0.5) * gridStep,
-              Math.max(50, alt),
-            ],
-            normal: [nx2, ny2, nz],
-            color: [
-              Math.round(cfg.color[0] * bright - edge * 12),
-              Math.round(cfg.color[1] * bright - edge * 10),
-              Math.round(cfg.color[2] * bright - edge * 5),
-            ],
-          });
+        const cloudDensity = noiseVal * edgeFade;
+        if (cloudDensity < 0.05) continue;
+
+        // Place particles in each applicable band
+        for (let bi = 0; bi < maxBand; bi++) {
+          const cfg = CLOUD_BANDS[bi];
+
+          // More particles in denser areas, fewer at high altitudes
+          const bandDensity = cloudDensity * (1 - bi * 0.12);
+          const numPts = Math.ceil(bandDensity * 2.5);
+
+          for (let p = 0; p < numPts; p++) {
+            const jitterX = (Math.random() - 0.5) * gridStep * 1.2;
+            const jitterY = (Math.random() - 0.5) * gridStep * 1.2;
+            const alt = cfg.alt + (Math.random() - 0.5) * cfg.spread;
+
+            // Normal: mostly upward with some variation
+            const angle = Math.random() * Math.PI * 2;
+            const tilt = (Math.random() - 0.5) * 0.5;
+
+            // Color: brighter in dense core, subtle blue tint at edges
+            const bright = 0.82 + cloudDensity * 0.18;
+            const edge = Math.min(1, dist * 2);
+
+            bands[bi].push({
+              position: [
+                city.lon + dx + jitterX,
+                city.lat + dy + jitterY,
+                Math.max(30, alt),
+              ],
+              normal: [
+                Math.cos(angle) * Math.cos(tilt),
+                Math.sin(angle) * Math.cos(tilt),
+                0.75 + Math.sin(tilt) * 0.25,
+              ],
+              color: [
+                Math.round(cfg.color[0] * bright - edge * 15),
+                Math.round(cfg.color[1] * bright - edge * 12),
+                Math.round(cfg.color[2] * bright - edge * 6),
+              ],
+            });
+          }
         }
       }
-
-      bands.push(points);
     }
 
     this.cloudData = bands;
     const total = bands.reduce((s, b) => s + b.length, 0);
-    console.log(`[DeckClouds] ${total} volumetric points for ${city.name} across ${CLOUD_BANDS.length} bands`);
+    console.log(`[DeckClouds] ${total} points for ${city.name} (${noiseW}×${noiseH} noise texture)`);
   }
 
   // ── Wind (reference: globe example — path-based animation) ──────────
