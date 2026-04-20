@@ -65,7 +65,9 @@ async function init() {
 
   await new Promise<void>((resolve) => map.on('load', () => resolve()));
 
-  // ── Terrain ────────────────────────────────────────────────────────
+  // ── Terrain (disabled on globe — MapLibre doesn't support both yet) ──
+  // Uncomment below when using mercator projection instead of globe
+  /*
   try {
     map.addSource('terrain-dem', {
       type: 'raster-dem',
@@ -85,10 +87,14 @@ async function init() {
       },
     });
   } catch (e) { console.warn('[Terrain] Failed:', e); }
+  */
 
   map.on('error', (e) => {
     const msg = e.error?.message || '';
+    // Suppress known globe projection / terrain warnings
     if (msg.includes('rainviewer') || msg.includes('404') || msg.includes('not supported')) return;
+    if (msg.includes('globe projection') || msg.includes('Easing around')) return;
+    if (msg.includes('calculateFogMatrix') || msg.includes('terrain')) return;
     console.error('MapLibre error:', e);
   });
 
@@ -114,8 +120,9 @@ async function init() {
       }
     },
     onCameraMode: (mode) => {
-      if (mode === 'orbit') map.easeTo({ pitch: 49, bearing: -20, duration: 1000 });
-      else if (mode === 'freeflight') map.easeTo({ pitch: 75, bearing: map.getBearing(), duration: 1000 });
+      // Note: easeTo not supported on globe projection, use flyTo
+      if (mode === 'orbit') map.flyTo({ pitch: 49, bearing: -20, duration: 1000 });
+      else if (mode === 'freeflight') map.flyTo({ pitch: 75, bearing: map.getBearing(), duration: 1000 });
     },
   });
 
