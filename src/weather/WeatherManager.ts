@@ -7,6 +7,7 @@
 
 import type { WeatherLevel, WeatherLayer, WeatherGrid, CloudLayers } from './types';
 import { fetchRealWeatherGrid } from './OpenMeteo';
+import { fetchNASAPowerCloudLayers } from './NASAPower';
 
 const API_BASE = 'http://localhost:3001';
 
@@ -83,12 +84,46 @@ export class WeatherManager {
   }
 
   /**
-   * Fetch 3-layer cloud data from the backend.
+   * Fetch 3-layer cloud data from GFS backend or NASA POWER fallback.
    */
   async fetchCloudLayers(): Promise<CloudLayers | null> {
-    // Skip if backend is known to be down
+    // Try GFS backend first
     const available = await this.checkBackend();
-    if (!available) return null;
+    if (available) {
+      const gfsResult = await this.fetchCloudLayersFromBackend();
+      if (gfsResult) return gfsResult;
+    }
+
+    // Fallback: NASA POWER (free, no API key, has CLDLOW/CLDMID/CLDHIGH)
+    console.log('[Weather] Trying NASA POWER for cloud layers...');
+    try {
+      const nasaData = await fetchNASAPowerCloudLayers();
+      if (nasaData) {
+        this.cloudLayers = {
+          width: nasaData.width,
+          height: nasaData.height,
+          low: nasaData.low,
+          medium: nasaData.medium,
+          high: nasaData.high,
+          windU: nasaData.windU,
+          windV: nasaData.windV,
+          source: 'NASA POWER',
+        };
+        console.log(`[Weather] Cloud layers from NASA POWER (${nasaData.width}x${nasaData.height})`);
+        this.emit('cloudLayersLoaded', this.cloudLayers);
+        return this.cloudLayers;
+      }
+    } catch (e) {
+      console.warn('[Weather] NASA POWER failed:', e);
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetch cloud layers from GFS backend.
+   */
+  private async fetchCloudLayersFromBackend(): Promise<CloudLayers | null> {
 
     try {
       const timeStr = new Date(this.currentTime).toISOString();

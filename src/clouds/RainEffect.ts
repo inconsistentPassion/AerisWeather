@@ -10,8 +10,8 @@ import maplibregl from 'maplibre-gl';
 
 // ── Configuration ─────────────────────────────────────────────────────
 
-const MAX_DROPS = 6000;
-const SPAWN_PER_FRAME = 150;
+const MAX_DROPS = 20000;
+const SPAWN_PER_FRAME = 400;
 const TILE_PX = 256;
 const RAINDVIEWER_API = 'https://api.rainviewer.com/public/weather-maps.json';
 const REFRESH_INTERVAL = 10 * 60 * 1000;
@@ -139,6 +139,7 @@ interface BinGL { vbo: WebGLBuffer; count: number; }
 
 export class RainEffect {
   private map: maplibregl.Map;
+  private weather: any = null;
   private gl: WebGLRenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private bins: Map<number, BinGL> = new Map();
@@ -150,8 +151,9 @@ export class RainEffect {
   private shaderPrelude = '';
   private shaderDefine = '';
 
-  constructor(map: maplibregl.Map) {
+  constructor(map: maplibregl.Map, weather?: any) {
     this.map = map;
+    this.weather = weather;
     this.loadRadar();
     this.refreshTimer = setInterval(() => this.loadRadar(), REFRESH_INTERVAL);
   }

@@ -42,8 +42,8 @@ interface City {
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const NUM_WIND_PARTICLES = 8000;
-const WIND_TRAIL_LENGTH = 12;
+const NUM_WIND_PARTICLES = 25000;
+const WIND_TRAIL_LENGTH = 16;
 const BASE_WIND_SPEED = 0.008;
 
 const WIND_COLORS: [number, number, number, number][] = [
@@ -108,6 +108,7 @@ export class DeckLayers {
     intensity: number; age: number; maxAge: number;
   }> = [];
   private rainData: RainStreak[] = [];
+  private lastRainSpawn = 0;
 
   // Cloud dots — global 2D visualization
   private cloudDots: CloudDot[] = [];
@@ -468,40 +469,39 @@ export class DeckLayers {
   // ── Rain — vertical streaks from cloud coverage + humidity ──────────
 
   private tickRain(): void {
-    // Try radar first
     const radarCells = getCachedRadarCells();
-
-    // Also use weather data for rain generation
     const grid = this.weather.getGrid('surface');
+    const MAX_RAIN = 15000;
 
-    // Spawn from radar
+    // Spawn from radar — higher count
     if (radarCells.length > 0) {
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < 300; i++) {
         const cell = radarCells[Math.floor(Math.random() * radarCells.length)];
         if (Math.random() > cell.intensity) continue;
-        if (this.rainDrops.length >= 5000) break;
+        if (this.rainDrops.length >= MAX_RAIN) break;
 
-        const streakLen = 100 + Math.random() * 200 + cell.intensity * 200;
+        const streakLen = 120 + Math.random() * 250 + cell.intensity * 250;
         this.rainDrops.push({
-          lon: cell.lon + (Math.random() - 0.5) * 0.3,
-          lat: cell.lat + (Math.random() - 0.5) * 0.2,
+          lon: cell.lon + (Math.random() - 0.5) * 0.4,
+          lat: cell.lat + (Math.random() - 0.5) * 0.3,
           elev: 800 + (1 - cell.intensity) * 2000,
           fallSpeed: 40 + Math.random() * 60 + cell.intensity * 30,
           streakLen,
           intensity: cell.intensity,
           age: 0,
-          maxAge: 60 + Math.floor(Math.random() * 60),
+          maxAge: 50 + Math.floor(Math.random() * 50),
         });
       }
     }
 
-    // Also spawn from weather grid — where cloud fraction AND humidity are high
-    if (grid?.fields.cloudFraction && grid?.fields.humidity && this.rainDrops.length < 5000) {
+    // Spawn from weather grid — ALL cloudy/humid areas, not just radar
+    if (grid?.fields.cloudFraction && grid?.fields.humidity && this.rainDrops.length < MAX_RAIN) {
       const cf = grid.fields.cloudFraction;
       const hum = grid.fields.humidity;
       const w = grid.width, h = grid.height;
 
-      for (let i = 0; i < 150; i++) {
+      // Sample many more cells per frame
+      for (let i = 0; i < 400; i++) {
         const gi = Math.floor(Math.random() * w);
         const gj = Math.floor(Math.random() * h);
         const idx = gj * w + gi;
@@ -511,13 +511,14 @@ export class DeckLayers {
         let humidity = hum[idx];
         if (humidity > 1) humidity /= 100;
 
-        const rainProb = coverage * Math.max(0, (humidity - 40)) / 60;
-        if (rainProb < 0.1) continue;
-        if (Math.random() > rainProb * 1.5) continue;
+        // Rain anywhere with decent cloud cover + humidity
+        const rainProb = coverage * Math.max(0, humidity - 35) / 65;
+        if (rainProb < 0.08) continue;
+        if (Math.random() > rainProb * 2.0) continue;
 
-        const lon = (gi / w) * 360 - 180 + (Math.random() - 0.5) * 1.0;
-        const lat = 90 - (gj / h) * 180 + (Math.random() - 0.5) * 0.5;
-        const streakLen = 80 + Math.random() * 150 + coverage * 150;
+        const lon = (gi / w) * 360 - 180 + (Math.random() - 0.5) * 1.2;
+        const lat = 90 - (gj / h) * 180 + (Math.random() - 0.5) * 0.6;
+        const streakLen = 100 + Math.random() * 200 + coverage * 200;
 
         this.rainDrops.push({
           lon, lat,
@@ -526,7 +527,7 @@ export class DeckLayers {
           streakLen,
           intensity: Math.min(1, rainProb),
           age: 0,
-          maxAge: 60 + Math.floor(Math.random() * 60),
+          maxAge: 50 + Math.floor(Math.random() * 50),
         });
       }
     }
@@ -603,9 +604,9 @@ export class DeckLayers {
         data: this.rainData,
         getPath: (d: RainStreak) => d.path,
         getColor: (d: RainStreak) => d.color,
-        getWidth: 3.5,
+        getWidth: 4.0,
         widthUnits: 'pixels',
-        opacity: 0.9,
+        opacity: 0.85,
         pickable: false,
         capRounded: true,
       }));
@@ -656,9 +657,9 @@ export class DeckLayers {
         data: this.windData,
         getPath: (d: WindTrail) => d.path,
         getColor: (d: WindTrail) => d.color,
-        getWidth: 2.5,
+        getWidth: 3,
         widthUnits: 'pixels',
-        opacity: 0.85,
+        opacity: 0.9,
         pickable: false,
         capRounded: true,
         jointRounded: true,
