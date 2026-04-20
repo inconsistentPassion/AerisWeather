@@ -1,24 +1,27 @@
 /**
  * DeckLayers — Weather visualization using deck.gl layers.
  *
- * Global view: wind particle trails + rain scatter.
- * City focus: volumetric cloud particles (multiple altitude bands, overlapping).
+ * Clouds: PointCloudLayer (3D lit spheres, not flat circles)
+ * Wind:   PathLayer (multi-segment particle trails)
+ * Rain:   ScatterplotLayer (small flat drops)
  *
- * Uses MapboxOverlay (deck.gl) + MapLibre (flat mercator).
+ * References:
+ * - deck.gl/examples/point-cloud → PointCloudLayer with sizeUnits:'meters' + material
+ * - deck.gl/examples/maplibre    → MapboxOverlay as MapLibre IControl
+ * - deck.gl/examples/globe       → [lon, lat, altitude] positioning
  */
 
 import { MapboxOverlay } from '@deck.gl/mapbox';
-import { ScatterplotLayer, PathLayer } from '@deck.gl/layers';
+import { PointCloudLayer, ScatterplotLayer, PathLayer } from '@deck.gl/layers';
 import type { WeatherManager } from './WeatherManager';
 import type maplibregl from 'maplibre-gl';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-interface CloudParticle {
+interface CloudPoint {
   position: [number, number, number]; // lon, lat, altitude(m)
-  radius: number;
+  normal: [number, number, number];   // surface normal for lighting
   color: [number, number, number];
-  opacity: number;
 }
 
 interface WindTrail {
@@ -41,7 +44,7 @@ interface City {
 // ── Constants ─────────────────────────────────────────────────────────
 
 const NUM_WIND_PARTICLES = 5000;
-const WIND_TRAIL_LENGTH = 6;
+const WIND_TRAIL_LENGTH = 8;
 const BASE_WIND_SPEED = 0.005;
 
 const WIND_COLORS: [number, number, number, number][] = [
@@ -63,14 +66,14 @@ const RAIN_COLORS: [number, number, number][] = [
   [245, 250, 255],
 ];
 
-// Cloud altitude bands for volumetric effect
+// Cloud bands: altitude, point size (meters), color tint, opacity
 const CLOUD_BANDS = [
-  { name: 'low',     alt: 800,   spread: 600,  baseColor: [250, 250, 255] as [number, number, number], baseRadius: 400,  opacity: 0.55 },
-  { name: 'mid-low', alt: 1800,  spread: 800,  baseColor: [240, 242, 250] as [number, number, number], baseRadius: 600,  opacity: 0.45 },
-  { name: 'mid',     alt: 3200,  spread: 1200, baseColor: [230, 234, 245] as [number, number, number], baseRadius: 800,  opacity: 0.38 },
-  { name: 'mid-high',alt: 5000,  spread: 1500, baseColor: [220, 226, 242] as [number, number, number], baseRadius: 1000, opacity: 0.30 },
-  { name: 'high',    alt: 7500,  spread: 2000, baseColor: [210, 218, 240] as [number, number, number], baseRadius: 1200, opacity: 0.22 },
-  { name: 'cirrus',  alt: 10000, spread: 2500, baseColor: [200, 210, 238] as [number, number, number], baseRadius: 1800, opacity: 0.15 },
+  { alt: 800,   spread: 500,  pointSize: 800,  color: [248, 248, 255] as [number, number, number], opacity: 0.65 },
+  { alt: 1600,  spread: 700,  pointSize: 1200, color: [240, 242, 252] as [number, number, number], opacity: 0.50 },
+  { alt: 3000,  spread: 1000, pointSize: 1800, color: [232, 236, 248] as [number, number, number], opacity: 0.40 },
+  { alt: 5000,  spread: 1400, pointSize: 2500, color: [222, 228, 245] as [number, number, number], opacity: 0.30 },
+  { alt: 8000,  spread: 2000, pointSize: 3500, color: [212, 220, 242] as [number, number, number], opacity: 0.22 },
+  { alt: 11000, spread: 2500, pointSize: 5000, color: [200, 210, 238] as [number, number, number], opacity: 0.15 },
 ];
 
 // ── Main class ────────────────────────────────────────────────────────
@@ -84,11 +87,10 @@ export class DeckLayers {
   private windVisible = true;
   private radarVisible = true;
 
-  // State
   private focusedCity: City | null = null;
-  private cloudParticles: CloudParticle[] = [];
+  private cloudData: CloudPoint[][] = []; // one array per band
 
-  // Wind particles
+  // Wind state
   private windLon = new Float64Array(NUM_WIND_PARTICLES);
   private windLat = new Float64Array(NUM_WIND_PARTICLES);
   private windAge = new Float32Array(NUM_WIND_PARTICLES);
@@ -96,7 +98,6 @@ export class DeckLayers {
   private windTrailLat: Float64Array[] = [];
   private windTrailHead = new Uint16Array(NUM_WIND_PARTICLES);
 
-  // Cached
   private windData: WindTrail[] = [];
   private rainData: RainDrop[] = [];
 
@@ -124,29 +125,28 @@ export class DeckLayers {
     this.map = map;
     this.startAnimation();
 
-    // Re-render on any map interaction
-    map.on('move', () => this.updateLayers());
-    map.on('zoom', () => this.updateLayers());
+    // Re-render on map interaction so deck.gl stays synced
+    map.on('move',   () => this.updateLayers());
+    map.on('zoom',   () => this.updateLayers());
     map.on('rotate', () => this.updateLayers());
-    map.on('pitch', () => this.updateLayers());
+    map.on('pitch',  () => this.updateLayers());
   }
 
   setVisible(layer: 'clouds' | 'wind' | 'radar', visible: boolean): void {
     switch (layer) {
-      case 'clouds': this.cloudVisible = visible; break;
-      case 'wind': this.windVisible = visible; break;
-      case 'radar': this.radarVisible = visible; break;
+      case 'clouds':  this.cloudVisible = visible; break;
+      case 'wind':    this.windVisible = visible; break;
+      case 'radar':   this.radarVisible = visible; break;
     }
     this.updateLayers();
   }
 
-  /** Focus on a city — generate volumetric clouds in that area */
   focusCity(city: City | null): void {
     this.focusedCity = city;
     if (city) {
       this.generateVolumetricClouds(city);
     } else {
-      this.cloudParticles = [];
+      this.cloudData = [];
     }
     this.updateLayers();
   }
@@ -155,21 +155,21 @@ export class DeckLayers {
     if (this.animId) cancelAnimationFrame(this.animId);
   }
 
-  // ── Volumetric cloud generation ─────────────────────────────────────
+  // ── Volumetric cloud generation (reference: point-cloud example) ────
 
   private generateVolumetricClouds(city: City): void {
-    const particles: CloudParticle[] = [];
-    const regionSize = 0.8; // degrees around city center
-    const gridStep = 0.03;  // ~3km grid
+    const bands: CloudPoint[][] = [];
+    const regionRadius = 0.7; // degrees
+    const gridStep = 0.025;   // ~2.5km grid
 
-    // Generate a procedural cloud field using Perlin-like noise
-    for (let band = 0; band < CLOUD_BANDS.length; band++) {
-      const cfg = CLOUD_BANDS[band];
-      const density = 1 - band * 0.12; // denser at low altitudes
+    for (let bi = 0; bi < CLOUD_BANDS.length; bi++) {
+      const cfg = CLOUD_BANDS[bi];
+      const density = 1 - bi * 0.1;
+      const points: CloudPoint[] = [];
 
-      for (let dy = -regionSize; dy <= regionSize; dy += gridStep) {
-        for (let dx = -regionSize; dx <= regionSize; dx += gridStep) {
-          // Procedural coverage using overlapping sine waves
+      for (let dy = -regionRadius; dy <= regionRadius; dy += gridStep) {
+        for (let dx = -regionRadius; dx <= regionRadius; dx += gridStep) {
+          // Procedural cloud coverage — layered noise
           const nx = (city.lon + dx) * 3.7;
           const ny = (city.lat + dy) * 4.1;
           const coverage =
@@ -178,43 +178,48 @@ export class DeckLayers {
             (Math.cos(nx * 0.7 + ny * 2.1) * 0.5 + 0.5) *
             (Math.sin((nx + ny) * 0.5) * 0.3 + 0.7);
 
-          // Edge falloff — clouds thin out at region edges
-          const dist = Math.sqrt(dx * dx + dy * dy) / regionSize;
+          const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
           const edgeFade = Math.max(0, 1 - dist * dist);
-
           const c = coverage * edgeFade * density;
-          if (c < 0.15) continue;
+          if (c < 0.12) continue;
 
-          // Multiple particles per cell for volume
-          const numPts = Math.ceil(c * 3);
-          for (let p = 0; p < numPts; p++) {
-            const jitterX = (Math.random() - 0.5) * gridStep * 1.2;
-            const jitterY = (Math.random() - 0.5) * gridStep * 1.2;
-            const alt = cfg.alt + (Math.random() - 0.5) * cfg.spread;
-            const sizeJitter = 0.6 + Math.random() * 0.8;
+          // Random normal for lighting variation (simulates cloud surface bumps)
+          const normalAngle = Math.random() * Math.PI * 2;
+          const normalTilt = (Math.random() - 0.5) * 0.6;
+          const nx2 = Math.cos(normalAngle) * Math.cos(normalTilt);
+          const ny2 = Math.sin(normalAngle) * Math.cos(normalTilt);
+          const nz = 0.8 + Math.sin(normalTilt) * 0.2; // mostly upward
 
-            // Color: whiter in center, bluer at edges
-            const edge = Math.min(1, dist * 1.5);
-            const r = Math.round(cfg.baseColor[0] - edge * 15);
-            const g = Math.round(cfg.baseColor[1] - edge * 12);
-            const b = Math.round(cfg.baseColor[2] - edge * 5);
+          const alt = cfg.alt + (Math.random() - 0.5) * cfg.spread;
 
-            particles.push({
-              position: [city.lon + dx + jitterX, city.lat + dy + jitterY, Math.max(50, alt)],
-              radius: cfg.baseRadius * c * sizeJitter,
-              color: [r, g, b],
-              opacity: cfg.opacity * c,
-            });
-          }
+          // Color: brighter in dense center, darker at edges
+          const bright = 0.85 + c * 0.15;
+          const edge = Math.min(1, dist * 1.5);
+          points.push({
+            position: [
+              city.lon + dx + (Math.random() - 0.5) * gridStep,
+              city.lat + dy + (Math.random() - 0.5) * gridStep,
+              Math.max(50, alt),
+            ],
+            normal: [nx2, ny2, nz],
+            color: [
+              Math.round(cfg.color[0] * bright - edge * 12),
+              Math.round(cfg.color[1] * bright - edge * 10),
+              Math.round(cfg.color[2] * bright - edge * 5),
+            ],
+          });
         }
       }
+
+      bands.push(points);
     }
 
-    this.cloudParticles = particles;
-    console.log(`[DeckClouds] ${particles.length} volumetric particles for ${city.name}`);
+    this.cloudData = bands;
+    const total = bands.reduce((s, b) => s + b.length, 0);
+    console.log(`[DeckClouds] ${total} volumetric points for ${city.name} across ${CLOUD_BANDS.length} bands`);
   }
 
-  // ── Wind particles ──────────────────────────────────────────────────
+  // ── Wind (reference: globe example — path-based animation) ──────────
 
   private spawnWindParticle(i: number): void {
     this.windLon[i] = (Math.random() - 0.5) * 360;
@@ -240,9 +245,11 @@ export class DeckLayers {
     const fy = y - Math.floor(y);
     const bl = (a: number, b: number, c: number, d: number) =>
       a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy;
-    const uVal = bl(u[y0 * gw + x0], u[y0 * gw + x1], u[y1 * gw + x0], u[y1 * gw + x1]);
-    const vVal = bl(v[y0 * gw + x0], v[y0 * gw + x1], v[y1 * gw + x0], v[y1 * gw + x1]);
-    return { u: uVal, v: vVal, speed: Math.sqrt(uVal * uVal + vVal * vVal) };
+    return {
+      u: bl(u[y0 * gw + x0], u[y0 * gw + x1], u[y1 * gw + x0], u[y1 * gw + x1]),
+      v: bl(v[y0 * gw + x0], v[y0 * gw + x1], v[y1 * gw + x0], v[y1 * gw + x1]),
+      get speed() { return Math.sqrt(this.u * this.u + this.v * this.v); },
+    };
   }
 
   private advectAndBuildWind(): void {
@@ -260,11 +267,12 @@ export class DeckLayers {
       }
 
       const wind = this.sampleWind(u, v, this.windLon[i], this.windLat[i]);
-      if (wind.speed >= 0.3) {
+      const spd = wind.speed;
+      if (spd >= 0.3) {
         const cosLat = Math.max(0.3, Math.cos(this.windLat[i] * Math.PI / 180));
-        const sf = Math.sqrt(wind.speed);
-        this.windLon[i] += (wind.u / wind.speed) * sf * BASE_WIND_SPEED / cosLat;
-        this.windLat[i] += (wind.v / wind.speed) * sf * BASE_WIND_SPEED;
+        const sf = Math.sqrt(spd);
+        this.windLon[i] += (wind.u / spd) * sf * BASE_WIND_SPEED / cosLat;
+        this.windLat[i] += (wind.v / spd) * sf * BASE_WIND_SPEED;
         if (this.windLon[i] > 180) this.windLon[i] -= 360;
         if (this.windLon[i] < -180) this.windLon[i] += 360;
         this.windLat[i] = Math.max(-85, Math.min(85, this.windLat[i]));
@@ -275,18 +283,18 @@ export class DeckLayers {
       this.windTrailLat[i][head] = this.windLat[i];
       this.windTrailHead[i] = (head + 1) % WIND_TRAIL_LENGTH;
 
-      if (this.windAge[i] < WIND_TRAIL_LENGTH || wind.speed < 0.5) continue;
+      if (this.windAge[i] < WIND_TRAIL_LENGTH || spd < 0.5) continue;
 
-      // Check for dateline wrapping
-      let breakFlag = false;
+      // Skip dateline wrapping
+      let skip = false;
       for (let t = 0; t < WIND_TRAIL_LENGTH - 1; t++) {
         const s0 = (head + t) % WIND_TRAIL_LENGTH;
         const s1 = (head + t + 1) % WIND_TRAIL_LENGTH;
         if (Math.abs(this.windTrailLon[i][s1] - this.windTrailLon[i][s0]) > 15) {
-          breakFlag = true; break;
+          skip = true; break;
         }
       }
-      if (breakFlag) continue;
+      if (skip) continue;
 
       const path: [number, number, number][] = [];
       for (let t = 0; t < WIND_TRAIL_LENGTH; t++) {
@@ -294,7 +302,7 @@ export class DeckLayers {
         path.push([this.windTrailLon[i][idx], this.windTrailLat[i][idx], 0]);
       }
 
-      const bin = Math.min(7, Math.floor((wind.speed / 25) * 8));
+      const bin = Math.min(7, Math.floor((spd / 25) * 8));
       const [r, g, b, a] = WIND_COLORS[bin];
       const fade = Math.min(1, this.windAge[i] / 10);
       trails.push({ path, color: [r, g, b, Math.round(a * fade)] });
@@ -333,7 +341,7 @@ export class DeckLayers {
         drops.push({
           position: [lon, lat, 0],
           color: [r, g, b],
-          radius: 3000 + intensity * 6000,
+          radius: 2000 + intensity * 5000,
         });
       }
     }
@@ -346,7 +354,7 @@ export class DeckLayers {
   private startAnimation(): void {
     let lastFrame = 0;
     const tick = (now: number) => {
-      if (now - lastFrame > 66) {
+      if (now - lastFrame > 66) { // ~15fps
         lastFrame = now;
         this.frameCount++;
         this.advectAndBuildWind();
@@ -363,7 +371,7 @@ export class DeckLayers {
   private updateLayers(): void {
     const layers: any[] = [];
 
-    // Rain (global)
+    // Rain — ScatterplotLayer (flat circles, fast)
     if (this.radarVisible && this.rainData.length > 0) {
       layers.push(new ScatterplotLayer({
         id: 'deck-rain',
@@ -379,7 +387,7 @@ export class DeckLayers {
       }));
     }
 
-    // Wind (global)
+    // Wind — PathLayer with multi-segment trails
     if (this.windVisible && this.windData.length > 0) {
       layers.push(new PathLayer({
         id: 'deck-wind',
@@ -395,31 +403,31 @@ export class DeckLayers {
       }));
     }
 
-    // Volumetric clouds (city focus only)
-    if (this.cloudVisible && this.cloudParticles.length > 0) {
-      // Create one ScatterplotLayer per altitude band for proper depth sorting
-      for (let band = 0; band < CLOUD_BANDS.length; band++) {
-        const cfg = CLOUD_BANDS[band];
-        const bandParticles = this.cloudParticles.filter(
-          (_, idx) => idx % CLOUD_BANDS.length === band
-        );
-        if (bandParticles.length === 0) continue;
+    // Volumetric clouds — PointCloudLayer per band (3D lit spheres)
+    // Reference: deck.gl/examples/point-cloud
+    //   PointCloudLayer with sizeUnits:'meters', pointSize, material, getNormal
+    if (this.cloudVisible && this.cloudData.length > 0) {
+      for (let bi = 0; bi < CLOUD_BANDS.length; bi++) {
+        const cfg = CLOUD_BANDS[bi];
+        const points = this.cloudData[bi];
+        if (!points || points.length === 0) continue;
 
-        layers.push(new ScatterplotLayer({
-          id: `deck-clouds-${cfg.name}`,
-          data: bandParticles,
-          getPosition: (d: CloudParticle) => d.position,
-          getRadius: (d: CloudParticle) => d.radius,
-          getFillColor: (d: CloudParticle) => d.color,
+        layers.push(new PointCloudLayer({
+          id: `deck-clouds-${bi}`,
+          data: points,
+          getPosition: (d: CloudPoint) => d.position,
+          getNormal: (d: CloudPoint) => d.normal,
+          getColor: (d: CloudPoint) => d.color,
+          pointSize: cfg.pointSize,
+          sizeUnits: 'meters',
           opacity: cfg.opacity,
-          radiusUnits: 'meters',
-          radiusMinPixels: 3,
-          radiusMaxPixels: 80,
           pickable: false,
-          // Blend mode: additive for that soft volumetric overlap
-          parameters: {
-            blendFunc: ['SRC_ALPHA', 'ONE_MINUS_SRC_ALPHA'],
-            blendEquation: 'FUNC_ADD',
+          // Phong-like material for volumetric lighting
+          material: {
+            ambient: 0.6,
+            diffuse: 0.7,
+            shininess: 20,
+            specularColor: [200, 200, 210],
           },
         }));
       }
