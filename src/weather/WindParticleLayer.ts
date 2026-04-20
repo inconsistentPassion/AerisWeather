@@ -9,7 +9,6 @@
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
-const EARTH_RADIUS = 6371000;
 const TOTAL_PARTICLES = 50000;
 const TRAIL_LEN = 5;
 const MAX_AGE = 100;
@@ -29,43 +28,19 @@ const BIN_COLORS: [number, number, number, number][] = [
 
 // ── Shaders ───────────────────────────────────────────────────────────
 
-const VERT = `
-  attribute vec3 aPos;
+// Vertex shader — uses MapLibre's projectTileFor3D for correct globe projection
+const VERT_BODY = `
+  attribute vec3 aMercator;  // x: mercatorX [0,1], y: mercatorY [0,1], z: elevation meters
   attribute float aAlpha;
 
-  uniform mat4 uProj;
   uniform float uLineWidth;
 
   varying float vAlpha;
 
   void main() {
     vAlpha = aAlpha;
-    vec4 p = uProj * vec4(aPos, 1.0);
-    gl_Position = p;
+    gl_Position = projectTileFor3D(aMercator);
     gl_PointSize = max(uLineWidth, 1.0);
-  }
-`;
-
-// Line shader for trail segments
-const LINE_VERT = `
-  attribute vec3 aPos0;
-  attribute float aAlpha0;
-  attribute vec3 aPos1;
-  attribute float aAlpha1;
-
-  uniform mat4 uProj;
-  uniform vec2 uResolution;
-
-  varying float vAlpha;
-  varying vec2 vDir;
-
-  void main() {
-    // Each vertex encodes a line segment; we emit both endpoints
-    // Using GL_LINES: vertex 0 = start, vertex 1 = end
-    vec4 p = uProj * vec4(aPos0, 1.0);
-    gl_Position = p;
-    vAlpha = aAlpha0;
-    vDir = vec2(0.0);
   }
 `;
 
@@ -78,21 +53,11 @@ const FRAG = `
   }
 `;
 
-// Line fragment shader
-const LINE_FRAG = `
-  precision mediump float;
-  varying float vAlpha;
-
-  void main() {
-    gl_FragColor = vec4(1.0, 1.0, 1.0, vAlpha);
-  }
-`;
-
 // ── Helpers ───────────────────────────────────────────────────────────
 
-function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
+function compileShader(gl: WebGLRenderingContext, type: number, src: string, prelude?: string): WebGLShader {
   const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
+  gl.shaderSource(s, prelude ? `${prelude}\n${src}` : src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
     console.error('[Wind] Shader error:', gl.getShaderInfoLog(s));
@@ -102,14 +67,11 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string): We
   return s;
 }
 
-function to3D(lat: number, lon: number): [number, number, number] {
-  const lr = lat * Math.PI / 180;
-  const ln = lon * Math.PI / 180;
-  return [
-    EARTH_RADIUS * Math.cos(lr) * Math.cos(ln),
-    EARTH_RADIUS * Math.cos(lr) * Math.sin(ln),
-    EARTH_RADIUS * Math.sin(lr),
-  ];
+function toMercator(lat: number, lon: number): { x: number; y: number } {
+  const x = (lon + 180) / 360;
+  const latRad = lat * Math.PI / 180;
+  const y = (1 - Math.log(Math.tan(Math.PI / 4 + latRad / 2)) / Math.PI) / 2;
+  return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
 // ── Main class ────────────────────────────────────────────────────────
@@ -127,7 +89,8 @@ export class WindParticleLayer {
   private bins: Map<number, BinGL> = new Map();
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private visible = false;
-  private animId: number | null = null;
+  private shaderPrelude = '';
+  private shaderDefine = '';
 
   // Particle state
   private lon = new Float64Array(TOTAL_PARTICLES);
@@ -164,46 +127,52 @@ export class WindParticleLayer {
         self.map = map;
         self.gl = gl;
 
-        const vs = compileShader(gl, gl.VERTEX_SHADER, VERT);
-        const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
-        self.program = gl.createProgram()!;
-        gl.attachShader(self.program, vs);
-        gl.attachShader(self.program, fs);
-        gl.linkProgram(self.program);
-        if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
-          console.error('[Wind] Link error:', gl.getProgramInfoLog(self.program));
-          return;
-        }
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
-
-        self.uniforms.uProj = gl.getUniformLocation(self.program, 'uProj');
-        self.uniforms.uLineWidth = gl.getUniformLocation(self.program, 'uLineWidth');
-        self.uniforms.uColor = gl.getUniformLocation(self.program, 'uColor');
-
         for (let b = 0; b < NUM_BINS; b++) {
           self.bins.set(b, { lineVBO: gl.createBuffer()!, lineCount: 0 });
         }
 
-        console.log('[Wind] WebGL layer ready');
+        console.log('[Wind] WebGL layer added');
       },
 
       render(gl: WebGLRenderingContext, args: any) {
-        if (!self.program || !self.visible) return;
-        const mat = args?.defaultProjectionData?.mainMatrix;
-        if (!mat || mat.length !== 16) return;
+        if (!self.visible) return;
+
+        // Lazy shader compilation
+        if (!self.program && args?.shaderData) {
+          self.shaderPrelude = args.shaderData.vertexShaderPrelude || '';
+          self.shaderDefine = args.shaderData.define || '';
+          const prelude = `${self.shaderPrelude}\n${self.shaderDefine}`;
+          const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
+          const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
+          self.program = gl.createProgram()!;
+          gl.attachShader(self.program, vs);
+          gl.attachShader(self.program, fs);
+          gl.linkProgram(self.program);
+          if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
+            console.error('[Wind] Link error:', gl.getProgramInfoLog(self.program));
+            self.program = null;
+            return;
+          }
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+
+          self.uniforms.uLineWidth = gl.getUniformLocation(self.program, 'uLineWidth');
+          self.uniforms.uColor = gl.getUniformLocation(self.program, 'uColor');
+          console.log('[Wind] Shader compiled');
+        }
+        if (!self.program) return;
 
         // Advect + build geometry
         self.tick();
 
         // Upload + draw
         gl.useProgram(self.program);
-        gl.uniformMatrix4fv(self.uniforms.uProj, false, new Float32Array(mat));
+        gl.uniform1f(self.uniforms.uLineWidth, 2.0);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
 
-        const aPos = gl.getAttribLocation(self.program, 'aPos');
+        const aMercator = gl.getAttribLocation(self.program, 'aMercator');
         const aAlpha = gl.getAttribLocation(self.program, 'aAlpha');
 
         for (let b = 0; b < NUM_BINS; b++) {
@@ -216,21 +185,20 @@ export class WindParticleLayer {
           gl.bindBuffer(gl.ARRAY_BUFFER, binGL.lineVBO);
 
           const stride = 16; // 4 floats: x, y, z, alpha
-          gl.enableVertexAttribArray(aPos);
-          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+          gl.enableVertexAttribArray(aMercator);
+          gl.vertexAttribPointer(aMercator, 3, gl.FLOAT, false, stride, 0);
           gl.enableVertexAttribArray(aAlpha);
           gl.vertexAttribPointer(aAlpha, 1, gl.FLOAT, false, stride, 12);
 
           gl.drawArrays(gl.LINES, 0, binGL.lineCount);
         }
 
-        gl.disableVertexAttribArray(aPos);
+        gl.disableVertexAttribArray(aMercator);
         gl.disableVertexAttribArray(aAlpha);
         gl.depthMask(true);
       },
 
       onRemove(_map: maplibregl.Map, gl: WebGLRenderingContext) {
-        if (self.animId) cancelAnimationFrame(self.animId);
         for (const [, bg] of self.bins) gl.deleteBuffer(bg.lineVBO);
         if (self.program) gl.deleteProgram(self.program);
         self.bins.clear();
@@ -310,7 +278,7 @@ export class WindParticleLayer {
       let sc = this.binSegCount[bin];
       const maxSegs = segs.length / 8;
 
-      // Build trail segments as 3D globe positions
+      // Build trail segments as mercator globe positions
       for (let t = 0; t < TRAIL_LEN - 1 && sc < maxSegs; t++) {
         const s0 = (h + t) % TRAIL_LEN;
         const s1 = (h + t + 1) % TRAIL_LEN;
@@ -320,15 +288,17 @@ export class WindParticleLayer {
         // Skip date-line wrapping
         if (Math.abs(lon1 - lon0) > 10) continue;
 
-        const [x0, y0, z0] = to3D(lat0, lon0);
-        const [x1, y1, z1] = to3D(lat1, lon1);
+        const m0 = toMercator(lat0, lon0);
+        const m1 = toMercator(lat1, lon1);
+        // Elevation: small offset above surface for wind visual
+        const elev = 500 + (bin / NUM_BINS) * 3000;
 
         // Trail alpha fades toward tail
         const trailAlpha = alpha * (t / TRAIL_LEN);
 
         const off = sc * 8;
-        segs[off] = x0; segs[off+1] = y0; segs[off+2] = z0; segs[off+3] = trailAlpha;
-        segs[off+4] = x1; segs[off+5] = y1; segs[off+6] = z1; segs[off+7] = trailAlpha * 0.9;
+        segs[off] = m0.x; segs[off+1] = m0.y; segs[off+2] = elev; segs[off+3] = trailAlpha;
+        segs[off+4] = m1.x; segs[off+5] = m1.y; segs[off+6] = elev; segs[off+7] = trailAlpha * 0.9;
         sc++;
       }
 

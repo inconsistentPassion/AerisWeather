@@ -7,7 +7,6 @@
 
 import maplibregl from 'maplibre-gl';
 
-const EARTH_RADIUS = 6371000;
 const MAX_DROPS = 5000;
 const SPAWN_PER_FRAME = 120;
 const TILE_PX = 256;
@@ -25,17 +24,16 @@ const BIN_COLORS: [number, number, number, number][] = [
 
 // ── Shader ────────────────────────────────────────────────────────────
 
-const VERT = `
-  attribute vec3 aPos;
+// Vertex shader — uses MapLibre's projectTileFor3D for correct globe projection
+const VERT_BODY = `
+  attribute vec3 aMercator;  // x: mercatorX [0,1], y: mercatorY [0,1], z: elevation meters
   attribute float aAlpha;
-
-  uniform mat4 uProj;
 
   varying float vAlpha;
 
   void main() {
     vAlpha = aAlpha;
-    gl_Position = uProj * vec4(aPos, 1.0);
+    gl_Position = projectTileFor3D(aMercator);
     gl_PointSize = 1.5;
   }
 `;
@@ -52,9 +50,9 @@ const FRAG = `
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
+function compileShader(gl: WebGLRenderingContext, type: number, src: string, prelude?: string): WebGLShader {
   const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
+  gl.shaderSource(s, prelude ? `${prelude}\n${src}` : src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
     console.error('[Rain] Shader error:', gl.getShaderInfoLog(s));
@@ -64,14 +62,11 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string): We
   return s;
 }
 
-function to3D(lat: number, lon: number): [number, number, number] {
-  const lr = lat * Math.PI / 180;
-  const ln = lon * Math.PI / 180;
-  return [
-    EARTH_RADIUS * Math.cos(lr) * Math.cos(ln),
-    EARTH_RADIUS * Math.cos(lr) * Math.sin(ln),
-    EARTH_RADIUS * Math.sin(lr),
-  ];
+function toMercator(lat: number, lon: number): { x: number; y: number } {
+  const x = (lon + 180) / 360;
+  const latRad = lat * Math.PI / 180;
+  const y = (1 - Math.log(Math.tan(Math.PI / 4 + latRad / 2)) / Math.PI) / 2;
+  return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
 function pixelToLon(tx: number, px: number, z: number) {
@@ -100,6 +95,8 @@ export class RainEffect {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private cells: PrecipCell[] = [];
   private drops: Drop[] = [];
+  private shaderPrelude = '';
+  private shaderDefine = '';
 
   constructor(map: maplibregl.Map) {
     this.map = map;
@@ -112,50 +109,55 @@ export class RainEffect {
     return {
       id: 'rain-lines',
       type: 'custom',
-      renderingMode: '2d',
+      renderingMode: '3d',
 
       onAdd(map: maplibregl.Map, gl: WebGLRenderingContext) {
         self.gl = gl;
-
-        const vs = compileShader(gl, gl.VERTEX_SHADER, VERT);
-        const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
-        self.program = gl.createProgram()!;
-        gl.attachShader(self.program, vs);
-        gl.attachShader(self.program, fs);
-        gl.linkProgram(self.program);
-        if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
-          console.error('[Rain] Link error:', gl.getProgramInfoLog(self.program));
-          return;
-        }
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
-
-        self.uniforms.uProj = gl.getUniformLocation(self.program, 'uProj');
-        self.uniforms.uColor = gl.getUniformLocation(self.program, 'uColor');
 
         for (let b = 0; b < NUM_BINS; b++) {
           self.bins.set(b, { vbo: gl.createBuffer()!, count: 0 });
         }
 
-        console.log('[Rain] WebGL layer ready');
+        console.log('[Rain] WebGL layer added');
       },
 
       render(gl: WebGLRenderingContext, args: any) {
-        if (!self.program || !self.visible) return;
-        const mat = args?.defaultProjectionData?.mainMatrix;
-        if (!mat || mat.length !== 16) return;
+        if (!self.visible) return;
+
+        // Lazy shader compilation
+        if (!self.program && args?.shaderData) {
+          self.shaderPrelude = args.shaderData.vertexShaderPrelude || '';
+          self.shaderDefine = args.shaderData.define || '';
+          const prelude = `${self.shaderPrelude}\n${self.shaderDefine}`;
+          const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
+          const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
+          self.program = gl.createProgram()!;
+          gl.attachShader(self.program, vs);
+          gl.attachShader(self.program, fs);
+          gl.linkProgram(self.program);
+          if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
+            console.error('[Rain] Link error:', gl.getProgramInfoLog(self.program));
+            self.program = null;
+            return;
+          }
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+
+          self.uniforms.uColor = gl.getUniformLocation(self.program, 'uColor');
+          console.log('[Rain] Shader compiled');
+        }
+        if (!self.program) return;
 
         // Tick simulation
         self.tick();
 
         // Draw
         gl.useProgram(self.program);
-        gl.uniformMatrix4fv(self.uniforms.uProj, false, new Float32Array(mat));
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
 
-        const aPos = gl.getAttribLocation(self.program, 'aPos');
+        const aMercator = gl.getAttribLocation(self.program, 'aMercator');
         const aAlpha = gl.getAttribLocation(self.program, 'aAlpha');
 
         for (let b = 0; b < NUM_BINS; b++) {
@@ -167,15 +169,15 @@ export class RainEffect {
 
           gl.bindBuffer(gl.ARRAY_BUFFER, bg.vbo);
           const stride = 16;
-          gl.enableVertexAttribArray(aPos);
-          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+          gl.enableVertexAttribArray(aMercator);
+          gl.vertexAttribPointer(aMercator, 3, gl.FLOAT, false, stride, 0);
           gl.enableVertexAttribArray(aAlpha);
           gl.vertexAttribPointer(aAlpha, 1, gl.FLOAT, false, stride, 12);
 
           gl.drawArrays(gl.LINES, 0, bg.count);
         }
 
-        gl.disableVertexAttribArray(aPos);
+        gl.disableVertexAttribArray(aMercator);
         gl.disableVertexAttribArray(aAlpha);
         gl.depthMask(true);
       },
@@ -290,8 +292,11 @@ export class RainEffect {
       const headLat = d.lat - dropOffset * (d.fall + 0.5);
       if (Math.abs(headLat) > 90 || Math.abs(tailLat) > 90) continue;
 
-      const [x0, y0, z0] = to3D(tailLat, d.lon);
-      const [x1, y1, z1] = to3D(headLat, d.lon);
+      const m0 = toMercator(tailLat, d.lon);
+      const m1 = toMercator(headLat, d.lon);
+      // Elevation: slight offset above surface for rain visual
+      const elev0 = 100 + d.fall * 2000;
+      const elev1 = 100 + (d.fall + 0.1) * 2000;
 
       const bin = Math.min(NUM_BINS - 1, Math.floor(d.intensity * NUM_BINS));
       const ageFade = d.age < 8 ? d.age / 8 : d.fall > 0.8 ? (1 - d.fall) / 0.2 : 1;
@@ -303,8 +308,8 @@ export class RainEffect {
       if (sc >= maxS) continue;
 
       const off = sc * 8;
-      segs[off] = x0; segs[off+1] = y0; segs[off+2] = z0; segs[off+3] = alpha;
-      segs[off+4] = x1; segs[off+5] = y1; segs[off+6] = z1; segs[off+7] = alpha * 0.8;
+      segs[off] = m0.x; segs[off+1] = m0.y; segs[off+2] = elev0; segs[off+3] = alpha;
+      segs[off+4] = m1.x; segs[off+5] = m1.y; segs[off+6] = elev1; segs[off+7] = alpha * 0.8;
       countByBin[bin] = sc + 1;
     }
 

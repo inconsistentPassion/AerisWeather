@@ -11,17 +11,16 @@
 import maplibregl from 'maplibre-gl';
 import type { WeatherManager } from '../weather/WeatherManager';
 
-const EARTH_RADIUS = 6371000;
-
 // ── Shaders ───────────────────────────────────────────────────────────
 
-const VERT = `
-  attribute vec3 aPos;
+// Vertex shader uses MapLibre's projectTileFor3D for correct globe projection.
+// Prelude is injected at runtime from shaderData.vertexShaderPrelude.
+const VERT_BODY = `
+  attribute vec3 aMercator;  // x: mercatorX [0,1], y: mercatorY [0,1], z: elevation meters
   attribute float aSize;
   attribute vec4 aColor;
   attribute float aRot;
 
-  uniform mat4 uProj;
   uniform float uDPR;
   uniform float uTime;
 
@@ -32,11 +31,11 @@ const VERT = `
     vColor = aColor;
     vRot = aRot + uTime * 0.1;
 
-    vec4 mvPos = uProj * vec4(aPos, 1.0);
-    gl_Position = mvPos;
+    // Use MapLibre's projection (works for both mercator and globe)
+    gl_Position = projectTileFor3D(aMercator);
 
-    // Size: scale with distance for depth, larger at altitude
-    float dist = max(mvPos.w, 1.0);
+    // Size: scale with distance for depth
+    float dist = max(gl_Position.w, 1.0);
     float size = aSize * uDPR * (400.0 / dist);
     gl_PointSize = clamp(size, 2.0, 200.0);
   }
@@ -113,11 +112,11 @@ const BANDS: Band[] = [
 
 // ── GL helpers ────────────────────────────────────────────────────────
 
-const STRIDE = 36; // 9 floats: pos(3) + size(1) + color(4) + rot(1)
+const STRIDE = 36; // 9 floats: mercator(3) + size(1) + color(4) + rot(1)
 
-function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
+function compileShader(gl: WebGLRenderingContext, type: number, src: string, prelude?: string): WebGLShader {
   const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
+  gl.shaderSource(s, prelude ? `${prelude}\n${src}` : src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
     const err = gl.getShaderInfoLog(s);
@@ -127,11 +126,12 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string): We
   return s;
 }
 
-function to3D(lat: number, lon: number, alt: number): [number, number, number] {
-  const lr = lat * Math.PI / 180;
-  const ln = lon * Math.PI / 180;
-  const r = EARTH_RADIUS + alt;
-  return [r * Math.cos(lr) * Math.cos(ln), r * Math.cos(lr) * Math.sin(ln), r * Math.sin(lr)];
+/** Convert lat/lon to mercator [0,1] coords */
+function toMercator(lat: number, lon: number): { x: number; y: number } {
+  const x = (lon + 180) / 360;
+  const latRad = lat * Math.PI / 180;
+  const y = (1 - Math.log(Math.tan(Math.PI / 4 + latRad / 2)) / Math.PI) / 2;
+  return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
 // ── Main class ────────────────────────────────────────────────────────
@@ -147,6 +147,8 @@ export class CloudPointLayer {
   private dirty = true;
   private timer: ReturnType<typeof setInterval> | null = null;
   private startTime = Date.now();
+  private shaderPrelude = '';
+  private shaderDefine = '';
 
   constructor(weather: WeatherManager) {
     this.weather = weather;
@@ -166,26 +168,9 @@ export class CloudPointLayer {
         self.map = map;
         self.gl = gl;
 
-        const vs = compileShader(gl, gl.VERTEX_SHADER, VERT);
-        const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
-        self.program = gl.createProgram()!;
-        gl.attachShader(self.program, vs);
-        gl.attachShader(self.program, fs);
-        gl.linkProgram(self.program);
-        if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
-          console.error('[Clouds] Link error:', gl.getProgramInfoLog(self.program));
-          return;
-        }
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
-
-        self.uniforms.uProj = gl.getUniformLocation(self.program, 'uProj');
-        self.uniforms.uDPR = gl.getUniformLocation(self.program, 'uDPR');
-        self.uniforms.uTime = gl.getUniformLocation(self.program, 'uTime');
-
-        for (const b of BANDS) {
-          self.vbos.set(b.id, { buf: gl.createBuffer()!, count: 0 });
-        }
+        self.vbos.set('low', { buf: gl.createBuffer()!, count: 0 });
+        self.vbos.set('medium', { buf: gl.createBuffer()!, count: 0 });
+        self.vbos.set('high', { buf: gl.createBuffer()!, count: 0 });
 
         self.timer = setInterval(() => {
           if (self.visible && self.dirty) self.upload(gl);
@@ -196,12 +181,37 @@ export class CloudPointLayer {
       },
 
       render(gl: WebGLRenderingContext, args: any) {
-        if (!self.program || !self.visible) return;
+        if (!self.visible) return;
+
+        // Lazy shader compilation — we need shaderData from render args
+        if (!self.program && args?.shaderData) {
+          self.shaderPrelude = args.shaderData.vertexShaderPrelude || '';
+          self.shaderDefine = args.shaderData.define || '';
+          const prelude = `${self.shaderPrelude}\n${self.shaderDefine}`;
+          const vs = compileShader(gl, gl.VERTEX_SHADER, VERT_BODY, prelude);
+          const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG);
+          self.program = gl.createProgram()!;
+          gl.attachShader(self.program, vs);
+          gl.attachShader(self.program, fs);
+          gl.linkProgram(self.program);
+          if (!gl.getProgramParameter(self.program, gl.LINK_STATUS)) {
+            console.error('[Clouds] Link error:', gl.getProgramInfoLog(self.program));
+            self.program = null;
+            return;
+          }
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+
+          self.uniforms.uDPR = gl.getUniformLocation(self.program, 'uDPR');
+          self.uniforms.uTime = gl.getUniformLocation(self.program, 'uTime');
+          console.log('[Clouds] Shader compiled with prelude');
+        }
+        if (!self.program) return;
+
         const mat = args?.defaultProjectionData?.mainMatrix;
         if (!mat || mat.length !== 16) return;
 
         gl.useProgram(self.program);
-        gl.uniformMatrix4fv(self.uniforms.uProj, false, new Float32Array(mat));
         gl.uniform1f(self.uniforms.uDPR, window.devicePixelRatio || 1);
         gl.uniform1f(self.uniforms.uTime, (Date.now() - self.startTime) * 0.001);
 
@@ -209,7 +219,7 @@ export class CloudPointLayer {
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
 
-        const aPos = gl.getAttribLocation(self.program, 'aPos');
+        const aMercator = gl.getAttribLocation(self.program, 'aMercator');
         const aSize = gl.getAttribLocation(self.program, 'aSize');
         const aCol = gl.getAttribLocation(self.program, 'aColor');
         const aRot = gl.getAttribLocation(self.program, 'aRot');
@@ -222,8 +232,8 @@ export class CloudPointLayer {
 
           gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
 
-          gl.enableVertexAttribArray(aPos);
-          gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, STRIDE, 0);
+          gl.enableVertexAttribArray(aMercator);
+          gl.vertexAttribPointer(aMercator, 3, gl.FLOAT, false, STRIDE, 0);
           gl.enableVertexAttribArray(aSize);
           gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, STRIDE, 12);
           gl.enableVertexAttribArray(aCol);
@@ -234,7 +244,7 @@ export class CloudPointLayer {
           gl.drawArrays(gl.POINTS, 0, vb.count);
         }
 
-        gl.disableVertexAttribArray(aPos);
+        gl.disableVertexAttribArray(aMercator);
         gl.disableVertexAttribArray(aSize);
         gl.disableVertexAttribArray(aCol);
         gl.disableVertexAttribArray(aRot);
@@ -289,10 +299,11 @@ export class CloudPointLayer {
             const jLon = (Math.random() - 0.5) * (360 / w) * 1.1;
             const jLat = (Math.random() - 0.5) * (180 / h) * 1.1;
             const altCenter = band.altitude + (Math.random() - 0.5) * band.altitudeSpread;
+            const altMeters = Math.max(100, altCenter);
 
-            const [x, y, z] = to3D(
-              Math.max(-85, Math.min(85, lat + jLat)), lon + jLon, Math.max(100, altCenter)
-            );
+            const clampLat = Math.max(-85, Math.min(85, lat + jLat));
+            const clampLon = lon + jLon;
+            const m = toMercator(clampLat, clampLon);
 
             // Size: bigger for denser clouds, with variation
             const sizeVar = band.sizeRange[0] + c * (band.sizeRange[1] - band.sizeRange[0]) * (0.6 + Math.random() * 0.8);
@@ -304,7 +315,7 @@ export class CloudPointLayer {
             const rot = Math.random() * Math.PI * 2;
 
             const o = n * 9;
-            pts[o] = x; pts[o+1] = y; pts[o+2] = z;
+            pts[o] = m.x; pts[o+1] = m.y; pts[o+2] = altMeters; // mercator x, y, elevation(m)
             pts[o+3] = sizeVar;
             pts[o+4] = band.color[0]; pts[o+5] = band.color[1]; pts[o+6] = band.color[2];
             pts[o+7] = alpha;
