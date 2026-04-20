@@ -170,7 +170,7 @@ async function fetchCloudMap(): Promise<Float32Array | null> {
       resolve(null);
     };
 
-    img.src = CLOUD_MAP_URL;
+    img.src = CLOUD_MAP_URL + '?t=' + Date.now();
   });
 }
 

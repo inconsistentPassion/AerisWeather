@@ -620,7 +620,8 @@ export class CloudPointLayer {
       cloudData = this.satelliteCoverage.data;
       w = this.satelliteCoverage.width;
       h = this.satelliteCoverage.height;
-      dataSource = 'GIBS Satellite';
+      dataSource = 'EUMETSAT live-cloud-maps';
+      console.log(`[Clouds] Using satellite coverage: ${w}x${h}`);
     } else if (layers) {
       w = layers.width; h = layers.height;
       cloudData = new Float32Array(w * h);
