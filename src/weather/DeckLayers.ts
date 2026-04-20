@@ -23,10 +23,9 @@ interface WindTrail {
   color: [number, number, number, number];
 }
 
-interface RainDrop {
-  position: [number, number, number];
+interface RainStreak {
+  path: [number, number, number][];
   color: [number, number, number, number];
-  radius: number;
 }
 
 interface CloudDot {
@@ -61,14 +60,14 @@ const WIND_COLORS: [number, number, number, number][] = [
 // ── Global 2D cloud visualization (Windy-style heatmap dots) ──────────
 
 const CLOUD_COLORS: [number, number, number, number][] = [
-  [200, 210, 230, 20],   // < 0.1 — barely visible
-  [180, 195, 225, 50],   // 0.1-0.25
-  [160, 180, 220, 90],   // 0.25-0.4
-  [140, 165, 215, 130],  // 0.4-0.55
-  [120, 150, 210, 170],  // 0.55-0.7
-  [100, 135, 205, 200],  // 0.7-0.85
-  [80, 120, 200, 230],   // 0.85-0.95
-  [60, 105, 195, 255],   // > 0.95 — fully opaque
+  [220, 225, 240, 60],   // < 0.1 — light haze
+  [210, 215, 235, 100],  // 0.1-0.25
+  [195, 205, 230, 140],  // 0.25-0.4
+  [180, 190, 225, 180],  // 0.4-0.55
+  [160, 175, 220, 210],  // 0.55-0.7
+  [140, 160, 215, 235],  // 0.7-0.85
+  [120, 145, 210, 250],  // 0.85-0.95
+  [100, 130, 205, 255],  // > 0.95 — fully opaque
 ];
 
 const RAIN_COLORS: [number, number, number, number][] = [
@@ -102,13 +101,13 @@ export class DeckLayers {
 
   private windData: WindTrail[] = [];
 
-  // Rain — generated from weather data
+  // Rain — generated from weather data (vertical streaks)
   private rainDrops: Array<{
     lon: number; lat: number;
-    elev: number; fallSpeed: number;
+    elev: number; fallSpeed: number; streakLen: number;
     intensity: number; age: number; maxAge: number;
   }> = [];
-  private rainData: RainDrop[] = [];
+  private rainData: RainStreak[] = [];
 
   // Cloud dots — global 2D visualization
   private cloudDots: CloudDot[] = [];
@@ -360,8 +359,8 @@ export class DeckLayers {
         const binIdx = Math.min(7, Math.floor(cf * 8));
         const [r, g, b, a] = CLOUD_COLORS[binIdx];
 
-        // Radius scales with coverage — denser clouds = bigger dots
-        const radius = 15000 + cf * 35000;
+        // Radius scales with coverage — MUCH bigger for visibility
+        const radius = 30000 + cf * 60000;
 
         dots.push({
           position: [lon, lat],
@@ -466,7 +465,7 @@ export class DeckLayers {
     this.windData = trails;
   }
 
-  // ── Rain — generated from cloud coverage + humidity ──────────────────
+  // ── Rain — vertical streaks from cloud coverage + humidity ──────────
 
   private tickRain(): void {
     // Try radar first
@@ -474,35 +473,35 @@ export class DeckLayers {
 
     // Also use weather data for rain generation
     const grid = this.weather.getGrid('surface');
-    const cloudLayers = this.weather.getCloudLayers();
 
     // Spawn from radar
     if (radarCells.length > 0) {
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < 120; i++) {
         const cell = radarCells[Math.floor(Math.random() * radarCells.length)];
         if (Math.random() > cell.intensity) continue;
-        if (this.rainDrops.length >= 4000) break;
+        if (this.rainDrops.length >= 5000) break;
 
+        const streakLen = 100 + Math.random() * 200 + cell.intensity * 200;
         this.rainDrops.push({
           lon: cell.lon + (Math.random() - 0.5) * 0.3,
           lat: cell.lat + (Math.random() - 0.5) * 0.2,
           elev: 800 + (1 - cell.intensity) * 2000,
-          fallSpeed: 30 + Math.random() * 50 + cell.intensity * 25,
+          fallSpeed: 40 + Math.random() * 60 + cell.intensity * 30,
+          streakLen,
           intensity: cell.intensity,
           age: 0,
-          maxAge: 50 + Math.floor(Math.random() * 50),
+          maxAge: 60 + Math.floor(Math.random() * 60),
         });
       }
     }
 
     // Also spawn from weather grid — where cloud fraction AND humidity are high
-    if (grid?.fields.cloudFraction && grid?.fields.humidity && this.rainDrops.length < 4000) {
+    if (grid?.fields.cloudFraction && grid?.fields.humidity && this.rainDrops.length < 5000) {
       const cf = grid.fields.cloudFraction;
       const hum = grid.fields.humidity;
       const w = grid.width, h = grid.height;
 
-      // Spawn ~100 random cells per frame, biased toward rainy areas
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < 150; i++) {
         const gi = Math.floor(Math.random() * w);
         const gj = Math.floor(Math.random() * h);
         const idx = gj * w + gi;
@@ -512,28 +511,28 @@ export class DeckLayers {
         let humidity = hum[idx];
         if (humidity > 1) humidity /= 100;
 
-        // Rain probability: high clouds + high humidity
-        const rainProb = coverage * (humidity - 50) / 50; // humidity > 50% is rainy
-        if (rainProb < 0.15) continue;
-        if (Math.random() > rainProb) continue;
+        const rainProb = coverage * Math.max(0, (humidity - 40)) / 60;
+        if (rainProb < 0.1) continue;
+        if (Math.random() > rainProb * 1.5) continue;
 
-        const lon = (gi / w) * 360 - 180 + 0.5;
-        const lat = 90 - (gj / h) * 180 - 0.5;
+        const lon = (gi / w) * 360 - 180 + (Math.random() - 0.5) * 1.0;
+        const lat = 90 - (gj / h) * 180 + (Math.random() - 0.5) * 0.5;
+        const streakLen = 80 + Math.random() * 150 + coverage * 150;
 
         this.rainDrops.push({
-          lon: lon + (Math.random() - 0.5) * 0.5,
-          lat: lat + (Math.random() - 0.5) * 0.3,
+          lon, lat,
           elev: 600 + (1 - coverage) * 2200,
-          fallSpeed: 25 + Math.random() * 45 + coverage * 20,
+          fallSpeed: 30 + Math.random() * 50 + coverage * 25,
+          streakLen,
           intensity: Math.min(1, rainProb),
           age: 0,
-          maxAge: 50 + Math.floor(Math.random() * 50),
+          maxAge: 60 + Math.floor(Math.random() * 60),
         });
       }
     }
 
-    // Update drops
-    const drops: RainDrop[] = [];
+    // Update drops → build streak paths
+    const streaks: RainStreak[] = [];
     for (let i = this.rainDrops.length - 1; i >= 0; i--) {
       const d = this.rainDrops[i];
       d.age++;
@@ -544,22 +543,28 @@ export class DeckLayers {
         this.rainDrops.pop();
         continue;
       }
+      if (Math.abs(d.lat) > 85) continue;
 
-      const ageFade = d.age < 5 ? d.age / 5 : 1.0;
-      const groundFade = d.elev < 150 ? d.elev / 150 : 1.0;
+      const topElev = d.elev + d.streakLen;
+      const botElev = d.elev;
+
+      const ageFade = d.age < 4 ? d.age / 4 : 1.0;
+      const groundFade = botElev < 100 ? botElev / 100 : 1.0;
       const fade = ageFade * groundFade;
 
       const bin = Math.min(4, Math.floor(d.intensity * 5));
       const [r, g, b, a] = RAIN_COLORS[bin];
 
-      drops.push({
-        position: [d.lon, d.lat, d.elev],
+      streaks.push({
+        path: [
+          [d.lon, d.lat, topElev],
+          [d.lon, d.lat, botElev],
+        ],
         color: [r, g, b, Math.round(a * fade)],
-        radius: 800 + d.intensity * 2000,
       });
     }
 
-    this.rainData = drops;
+    this.rainData = streaks;
   }
 
   // ── Animation ───────────────────────────────────────────────────────
@@ -611,19 +616,18 @@ export class DeckLayers {
       }));
     }
 
-    // ── Rain — ScatterplotLayer (global from weather data + radar) ──
+    // ── Rain — PathLayer vertical streaks (NOT circles!) ──────────────
     if (this.radarVisible && this.rainData.length > 0) {
-      layers.push(new ScatterplotLayer({
-        id: 'rain-drops',
+      layers.push(new PathLayer({
+        id: 'rain-streaks',
         data: this.rainData,
-        getPosition: (d: RainDrop) => d.position,
-        getRadius: (d: RainDrop) => d.radius,
-        getFillColor: (d: RainDrop) => d.color,
-        radiusUnits: 'meters',
-        radiusMinPixels: 1,
-        radiusMaxPixels: 6,
-        opacity: 0.8,
+        getPath: (d: RainStreak) => d.path,
+        getColor: (d: RainStreak) => d.color,
+        getWidth: 1.8,
+        widthUnits: 'pixels',
+        opacity: 0.9,
         pickable: false,
+        capRounded: true,
       }));
     }
 
