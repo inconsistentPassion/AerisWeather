@@ -70,8 +70,22 @@ export async function fetchRealWeatherGrid(): Promise<{
       return null;
     }
 
+    // Debug: log sample cloud values
+    const sampleCF = quickData.map(p => `${p.lat},${p.lon}:${p.cloudCover.toFixed(2)}`).join(' ');
+    console.log(`[OpenMeteo] Sample cloud values: ${sampleCF}`);
+
     console.log(`[OpenMeteo] Quick fetch got ${quickData.length} points — filling grid`);
     const quickGrid = interpolateToGrid(quickData, [60, 20, -20, -60], [-120, 0, 120], 360, 180);
+    
+    // Debug: verify cloud data
+    let cfSum = 0, cfMax = 0, cfNonZero = 0;
+    for (let i = 0; i < quickGrid.fields.cloudFraction.length; i++) {
+      const v = quickGrid.fields.cloudFraction[i];
+      cfSum += v;
+      if (v > cfMax) cfMax = v;
+      if (v > 0.01) cfNonZero++;
+    }
+    console.log(`[OpenMeteo] Quick grid cloudFraction: max=${cfMax.toFixed(3)} avg=${(cfSum / quickGrid.fields.cloudFraction.length).toFixed(3)} nonZero=${cfNonZero}/${quickGrid.fields.cloudFraction.length}`);
     cache = { timestamp: Date.now(), grid: quickGrid };
 
     // STEP 2: Background fetch — finer resolution
@@ -237,14 +251,15 @@ function interpolateToGrid(
   const cloudFraction = new Float32Array(width * height);
 
   const sampleMap = new Map<string, SamplePoint>();
+  const latStep = sampleLats[1] - sampleLats[0];
+  const lonStep = sampleLons[1] - sampleLons[0];
+
   for (const s of samples) {
-    const latIdx = Math.round((s.lat + 90) / (sampleLats[1] - sampleLats[0]));
-    const lonIdx = Math.round((s.lon + 180) / (sampleLons[1] - sampleLons[0]));
+    const latIdx = Math.round((s.lat - sampleLats[0]) / latStep);
+    const lonIdx = Math.round((s.lon - sampleLons[0]) / lonStep);
     sampleMap.set(`${latIdx},${lonIdx}`, s);
   }
 
-  const latStep = sampleLats[1] - sampleLats[0];
-  const lonStep = sampleLons[1] - sampleLons[0];
   const numLats = sampleLats.length;
   const numLons = sampleLons.length;
 
