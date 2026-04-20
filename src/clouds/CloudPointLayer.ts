@@ -1,8 +1,11 @@
 /**
- * CloudPointLayer — 3D cloud points as a MapLibre custom WebGL layer.
+ * CloudPointLayer — 3D cloud visualization as a MapLibre custom WebGL layer.
  *
- * Renders cloud points in globe 3D space using MapLibre's native projection
- * matrices. Soft circle particles at 3 altitude bands create volumetric depth.
+ * Renders cloud points in true 3D globe space with:
+ * - Textured sprites (soft cloud puffs) instead of hard circles
+ * - 3 altitude bands with distinct visual character
+ * - Depth-based fading and size scaling
+ * - Overlapping semi-transparent particles for volumetric density
  */
 
 import maplibregl from 'maplibre-gl';
@@ -13,31 +16,67 @@ const EARTH_RADIUS = 6371000;
 // ── Shaders ───────────────────────────────────────────────────────────
 
 const VERT = `
-  attribute vec3 aPosition;
+  attribute vec3 aPos;
   attribute float aSize;
   attribute vec4 aColor;
+  attribute float aRot;
+
   uniform mat4 uProj;
   uniform float uDPR;
+  uniform float uTime;
+
   varying vec4 vColor;
+  varying float vRot;
+
   void main() {
     vColor = aColor;
-    vec4 p = uProj * vec4(aPosition, 1.0);
-    gl_Position = p;
-    gl_PointSize = aSize * uDPR * (250.0 / max(p.w, 1.0));
-    gl_PointSize = clamp(gl_PointSize, 1.0, 150.0);
+    vRot = aRot + uTime * 0.1;
+
+    vec4 mvPos = uProj * vec4(aPos, 1.0);
+    gl_Position = mvPos;
+
+    // Size: scale with distance for depth, larger at altitude
+    float dist = max(mvPos.w, 1.0);
+    float size = aSize * uDPR * (400.0 / dist);
+    gl_PointSize = clamp(size, 2.0, 200.0);
   }
 `;
 
 const FRAG = `
   precision mediump float;
   varying vec4 vColor;
+  varying float vRot;
+
+  // Procedural soft cloud puff
   void main() {
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
+
+    // Rotate for variation
+    float c = cos(vRot);
+    float s = sin(vRot);
+    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+
     float r2 = dot(uv, uv);
     if (r2 > 1.0) discard;
-    float alpha = 1.0 - smoothstep(0.2, 1.0, r2);
-    float glow = 1.0 + 0.12 * (1.0 - r2);
-    gl_FragColor = vec4(vColor.rgb * glow, vColor.a * alpha);
+
+    // Multi-lobe cloud shape (not just a circle)
+    float noise = 0.85 + 0.15 * (
+      sin(atan(uv.y, uv.x) * 3.0 + r2 * 4.0) *
+      sin(r2 * 6.0)
+    );
+
+    // Soft edge with smooth falloff
+    float edge = 1.0 - smoothstep(0.0, 1.0, r2 * noise);
+    float alpha = edge * vColor.a;
+
+    // Bright center (light scattering)
+    float core = 1.0 + 0.2 * exp(-r2 * 4.0);
+
+    // Subtle warm/cool tint based on distance from center
+    vec3 color = vColor.rgb * core;
+    color += vec3(0.02, 0.02, 0.03) * (1.0 - r2);
+
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
@@ -46,21 +85,35 @@ const FRAG = `
 interface Band {
   id: string;
   altitude: number;
+  altitudeSpread: number;
   color: [number, number, number];
   sizeRange: [number, number];
   opacityRange: [number, number];
   maxPoints: number;
+  density: number; // points per grid cell multiplier
 }
 
 const BANDS: Band[] = [
-  { id: 'low',    altitude: 1500,  color: [0.95, 0.95, 0.97], sizeRange: [10, 40], opacityRange: [0.35, 0.75], maxPoints: 30000 },
-  { id: 'medium', altitude: 5500,  color: [0.85, 0.87, 0.93], sizeRange: [12, 48], opacityRange: [0.25, 0.60], maxPoints: 22000 },
-  { id: 'high',   altitude: 10000, color: [0.78, 0.84, 0.96], sizeRange: [14, 55], opacityRange: [0.15, 0.45], maxPoints: 15000 },
+  {
+    id: 'low', altitude: 1200, altitudeSpread: 1800,
+    color: [0.96, 0.96, 0.98], sizeRange: [18, 55],
+    opacityRange: [0.4, 0.8], maxPoints: 45000, density: 4,
+  },
+  {
+    id: 'medium', altitude: 5000, altitudeSpread: 3000,
+    color: [0.88, 0.90, 0.94], sizeRange: [22, 65],
+    opacityRange: [0.3, 0.65], maxPoints: 30000, density: 3,
+  },
+  {
+    id: 'high', altitude: 9500, altitudeSpread: 4000,
+    color: [0.82, 0.87, 0.97], sizeRange: [25, 75],
+    opacityRange: [0.18, 0.45], maxPoints: 20000, density: 2,
+  },
 ];
 
-const STRIDE = 32; // 8 floats * 4 bytes
+// ── GL helpers ────────────────────────────────────────────────────────
 
-// ── Helpers ───────────────────────────────────────────────────────────
+const STRIDE = 36; // 9 floats: pos(3) + size(1) + color(4) + rot(1)
 
 function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader {
   const s = gl.createShader(type)!;
@@ -81,7 +134,7 @@ function to3D(lat: number, lon: number, alt: number): [number, number, number] {
   return [r * Math.cos(lr) * Math.cos(ln), r * Math.cos(lr) * Math.sin(ln), r * Math.sin(lr)];
 }
 
-// ── Class ─────────────────────────────────────────────────────────────
+// ── Main class ────────────────────────────────────────────────────────
 
 export class CloudPointLayer {
   private weather: WeatherManager;
@@ -93,6 +146,7 @@ export class CloudPointLayer {
   private visible = false;
   private dirty = true;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private startTime = Date.now();
 
   constructor(weather: WeatherManager) {
     this.weather = weather;
@@ -127,6 +181,7 @@ export class CloudPointLayer {
 
         self.uniforms.uProj = gl.getUniformLocation(self.program, 'uProj');
         self.uniforms.uDPR = gl.getUniformLocation(self.program, 'uDPR');
+        self.uniforms.uTime = gl.getUniformLocation(self.program, 'uTime');
 
         for (const b of BANDS) {
           self.vbos.set(b.id, { buf: gl.createBuffer()!, count: 0 });
@@ -148,26 +203,33 @@ export class CloudPointLayer {
         gl.useProgram(self.program);
         gl.uniformMatrix4fv(self.uniforms.uProj, false, new Float32Array(mat));
         gl.uniform1f(self.uniforms.uDPR, window.devicePixelRatio || 1);
+        gl.uniform1f(self.uniforms.uTime, (Date.now() - self.startTime) * 0.001);
 
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.depthMask(false);
 
-        const aPos = gl.getAttribLocation(self.program, 'aPosition');
+        const aPos = gl.getAttribLocation(self.program, 'aPos');
         const aSize = gl.getAttribLocation(self.program, 'aSize');
         const aCol = gl.getAttribLocation(self.program, 'aColor');
+        const aRot = gl.getAttribLocation(self.program, 'aRot');
 
-        for (const b of BANDS) {
-          const vb = self.vbos.get(b.id);
+        // Render back to front (high → mid → low) for proper blending
+        for (let bi = BANDS.length - 1; bi >= 0; bi--) {
+          const band = BANDS[bi];
+          const vb = self.vbos.get(band.id);
           if (!vb || vb.count === 0) continue;
 
           gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
+
           gl.enableVertexAttribArray(aPos);
           gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, STRIDE, 0);
           gl.enableVertexAttribArray(aSize);
           gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, STRIDE, 12);
           gl.enableVertexAttribArray(aCol);
           gl.vertexAttribPointer(aCol, 4, gl.FLOAT, false, STRIDE, 16);
+          gl.enableVertexAttribArray(aRot);
+          gl.vertexAttribPointer(aRot, 1, gl.FLOAT, false, STRIDE, 32);
 
           gl.drawArrays(gl.POINTS, 0, vb.count);
         }
@@ -175,6 +237,7 @@ export class CloudPointLayer {
         gl.disableVertexAttribArray(aPos);
         gl.disableVertexAttribArray(aSize);
         gl.disableVertexAttribArray(aCol);
+        gl.disableVertexAttribArray(aRot);
         gl.depthMask(true);
       },
 
@@ -207,42 +270,51 @@ export class CloudPointLayer {
       const band = BANDS[bi];
       const cov = coverages[bi];
       const isFallback = !layers;
-      const pts = new Float32Array(band.maxPoints * 8);
+      // Each point: pos(3) + size(1) + color(4) + rot(1) = 9 floats
+      const pts = new Float32Array(band.maxPoints * 9);
       let n = 0;
 
       for (let j = 0; j < h && n < band.maxPoints; j++) {
         for (let i = 0; i < w && n < band.maxPoints; i++) {
           let c = cov[j * w + i];
-          if (c > 1) c /= 100; // GFS percentage → fraction
+          if (c > 1) c /= 100;
           if (isFallback) c *= [0.5, 0.3, 0.2][bi];
-          if (c < 0.12) continue;
+          if (c < 0.1) continue;
 
           const lon = (i / w) * 360 - 180 + 0.5;
           const lat = 90 - (j / h) * 180 - 0.5;
-          const numPts = Math.max(1, Math.ceil(c * 3));
+          const numPts = Math.max(1, Math.ceil(c * band.density));
 
           for (let p = 0; p < numPts && n < band.maxPoints; p++) {
-            const jLon = (Math.random() - 0.5) * (360 / w) * 0.9;
-            const jLat = (Math.random() - 0.5) * (180 / h) * 0.9;
-            const alt = band.altitude * (0.5 + Math.random() * 1.0);
-            const [x, y, z] = to3D(
-              Math.max(-85, Math.min(85, lat + jLat)), lon + jLon, alt
-            );
-            const size = band.sizeRange[0] + c * (band.sizeRange[1] - band.sizeRange[0]) * (0.7 + Math.random() * 0.6);
-            const alpha = band.opacityRange[0] + c * (band.opacityRange[1] - band.opacityRange[0]);
+            const jLon = (Math.random() - 0.5) * (360 / w) * 1.1;
+            const jLat = (Math.random() - 0.5) * (180 / h) * 1.1;
+            const altCenter = band.altitude + (Math.random() - 0.5) * band.altitudeSpread;
 
-            const o = n * 8;
+            const [x, y, z] = to3D(
+              Math.max(-85, Math.min(85, lat + jLat)), lon + jLon, Math.max(100, altCenter)
+            );
+
+            // Size: bigger for denser clouds, with variation
+            const sizeVar = band.sizeRange[0] + c * (band.sizeRange[1] - band.sizeRange[0]) * (0.6 + Math.random() * 0.8);
+
+            // Opacity: denser clouds more opaque
+            const alpha = band.opacityRange[0] + c * (band.opacityRange[1] - band.opacityRange[0]) * (0.7 + Math.random() * 0.3);
+
+            // Random rotation for texture variation
+            const rot = Math.random() * Math.PI * 2;
+
+            const o = n * 9;
             pts[o] = x; pts[o+1] = y; pts[o+2] = z;
-            pts[o+3] = size;
+            pts[o+3] = sizeVar;
             pts[o+4] = band.color[0]; pts[o+5] = band.color[1]; pts[o+6] = band.color[2];
             pts[o+7] = alpha;
+            pts[o+8] = rot;
             n++;
           }
         }
       }
 
-      // Slice to actual size
-      const data = pts.subarray(0, n * 8);
+      const data = pts.subarray(0, n * 9);
       const vb = this.vbos.get(band.id)!;
       gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
       gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
