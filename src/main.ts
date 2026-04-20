@@ -91,7 +91,7 @@ async function init() {
   deckLayers.onMapReady(map);
 
   // ── MapLibre custom WebGL layers (data-driven clouds + rain) ──────
-  const cloudLayer = new CloudPointLayer(weather);
+  const cloudLayer = new CloudPointLayer();
   map.addLayer(cloudLayer.getLayer());
 
   const rainEffect = new RainEffect(map);
