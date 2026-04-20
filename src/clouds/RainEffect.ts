@@ -24,16 +24,17 @@ const BIN_COLORS: [number, number, number, number][] = [
 
 // ── Shader ────────────────────────────────────────────────────────────
 
-// Vertex shader — uses MapLibre's projectTileFor3D for correct globe projection
+// Vertex shader — uses MapLibre's projectTileWithElevation for correct globe projection
 const VERT_BODY = `
-  attribute vec3 aMercator;  // x: mercatorX [0,1], y: mercatorY [0,1], z: elevation meters
+  attribute vec2 aMercator;   // mercator x,y [0,1]
+  attribute float aElevation; // elevation above surface in meters
   attribute float aAlpha;
 
   varying float vAlpha;
 
   void main() {
     vAlpha = aAlpha;
-    gl_Position = projectTileFor3D(aMercator);
+    gl_Position = projectTileWithElevation(aMercator, aElevation);
     gl_PointSize = 1.5;
   }
 `;
@@ -158,6 +159,7 @@ export class RainEffect {
         gl.depthMask(false);
 
         const aMercator = gl.getAttribLocation(self.program, 'aMercator');
+        const aElevation = gl.getAttribLocation(self.program, 'aElevation');
         const aAlpha = gl.getAttribLocation(self.program, 'aAlpha');
 
         for (let b = 0; b < NUM_BINS; b++) {
@@ -170,7 +172,9 @@ export class RainEffect {
           gl.bindBuffer(gl.ARRAY_BUFFER, bg.vbo);
           const stride = 16;
           gl.enableVertexAttribArray(aMercator);
-          gl.vertexAttribPointer(aMercator, 3, gl.FLOAT, false, stride, 0);
+          gl.vertexAttribPointer(aMercator, 2, gl.FLOAT, false, stride, 0);
+          gl.enableVertexAttribArray(aElevation);
+          gl.vertexAttribPointer(aElevation, 1, gl.FLOAT, false, stride, 8);
           gl.enableVertexAttribArray(aAlpha);
           gl.vertexAttribPointer(aAlpha, 1, gl.FLOAT, false, stride, 12);
 
@@ -178,6 +182,7 @@ export class RainEffect {
         }
 
         gl.disableVertexAttribArray(aMercator);
+        gl.disableVertexAttribArray(aElevation);
         gl.disableVertexAttribArray(aAlpha);
         gl.depthMask(true);
       },

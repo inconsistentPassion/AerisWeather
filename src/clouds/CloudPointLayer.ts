@@ -13,10 +13,11 @@ import type { WeatherManager } from '../weather/WeatherManager';
 
 // ── Shaders ───────────────────────────────────────────────────────────
 
-// Vertex shader uses MapLibre's projectTileFor3D for correct globe projection.
+// Vertex shader uses MapLibre's projectTileWithElevation for correct globe projection.
 // Prelude is injected at runtime from shaderData.vertexShaderPrelude.
 const VERT_BODY = `
-  attribute vec3 aMercator;  // x: mercatorX [0,1], y: mercatorY [0,1], z: elevation meters
+  attribute vec2 aMercator;   // mercator x,y [0,1]
+  attribute float aElevation; // elevation above surface in meters
   attribute float aSize;
   attribute vec4 aColor;
   attribute float aRot;
@@ -32,7 +33,7 @@ const VERT_BODY = `
     vRot = aRot + uTime * 0.1;
 
     // Use MapLibre's projection (works for both mercator and globe)
-    gl_Position = projectTileFor3D(aMercator);
+    gl_Position = projectTileWithElevation(aMercator, aElevation);
 
     // Size: scale with distance for depth
     float dist = max(gl_Position.w, 1.0);
@@ -220,6 +221,7 @@ export class CloudPointLayer {
         gl.depthMask(false);
 
         const aMercator = gl.getAttribLocation(self.program, 'aMercator');
+        const aElevation = gl.getAttribLocation(self.program, 'aElevation');
         const aSize = gl.getAttribLocation(self.program, 'aSize');
         const aCol = gl.getAttribLocation(self.program, 'aColor');
         const aRot = gl.getAttribLocation(self.program, 'aRot');
@@ -233,7 +235,9 @@ export class CloudPointLayer {
           gl.bindBuffer(gl.ARRAY_BUFFER, vb.buf);
 
           gl.enableVertexAttribArray(aMercator);
-          gl.vertexAttribPointer(aMercator, 3, gl.FLOAT, false, STRIDE, 0);
+          gl.vertexAttribPointer(aMercator, 2, gl.FLOAT, false, STRIDE, 0);
+          gl.enableVertexAttribArray(aElevation);
+          gl.vertexAttribPointer(aElevation, 1, gl.FLOAT, false, STRIDE, 8);
           gl.enableVertexAttribArray(aSize);
           gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, STRIDE, 12);
           gl.enableVertexAttribArray(aCol);
@@ -245,6 +249,7 @@ export class CloudPointLayer {
         }
 
         gl.disableVertexAttribArray(aMercator);
+        gl.disableVertexAttribArray(aElevation);
         gl.disableVertexAttribArray(aSize);
         gl.disableVertexAttribArray(aCol);
         gl.disableVertexAttribArray(aRot);
