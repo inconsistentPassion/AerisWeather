@@ -139,12 +139,14 @@ export class DeckLayers {
     weather.on('dataLoaded', (d: any) => {
       console.log('[DeckLayers] dataLoaded event:', d);
       this.buildGlobalCloudDots();
+      if (this.focusedCity) this.generateVolumetricClouds(this.focusedCity);
       this.updateLayers();
     });
     weather.on('timeChange', () => this.updateLayers());
     weather.on('cloudLayersLoaded', (d: any) => {
       console.log('[DeckLayers] cloudLayersLoaded event:', d);
       this.buildGlobalCloudDots();
+      if (this.focusedCity) this.generateVolumetricClouds(this.focusedCity);
       this.updateLayers();
     });
 
@@ -152,6 +154,7 @@ export class DeckLayers {
     window.addEventListener('weather-grid-updated', () => {
       console.log('[DeckLayers] Grid updated event received — rebuilding');
       this.buildGlobalCloudDots();
+      if (this.focusedCity) this.generateVolumetricClouds(this.focusedCity);
       this.updateLayers();
     });
 
@@ -207,6 +210,43 @@ export class DeckLayers {
   // ── Volumetric 3D clouds for city focus ──────────────────────────────
 
   private generateVolumetricClouds(city: City): void {
+    // Look up real cloud fraction at this city location from the weather grid
+    const grid = this.weather.getGrid('surface');
+    let realCoverage = 1.0; // default: full coverage if no data
+    let dataSource = 'noise-only';
+
+    if (grid?.fields.cloudFraction) {
+      // Grid is 360x180, lon 0..359 maps to -180..179, lat 0..179 maps to 90..-89
+      const gx = Math.floor(((city.lon + 180) / 360) * grid.width) % grid.width;
+      const gy = Math.max(0, Math.min(grid.height - 1, Math.floor(((90 - city.lat) / 180) * grid.height)));
+      const idx = gy * grid.width + gx;
+      realCoverage = grid.fields.cloudFraction[idx] ?? 0;
+      // Also sample neighbors for smoother local average
+      const neighbors = [
+        { x: (gx + 1) % grid.width, y: gy },
+        { x: (gx - 1 + grid.width) % grid.width, y: gy },
+        { x: gx, y: Math.max(0, gy - 1) },
+        { x: gx, y: Math.min(grid.height - 1, gy + 1) },
+      ];
+      let sum = realCoverage;
+      let count = 1;
+      for (const n of neighbors) {
+        sum += grid.fields.cloudFraction[n.y * grid.width + n.x] ?? 0;
+        count++;
+      }
+      realCoverage = sum / count;
+      dataSource = 'Open-Meteo';
+    }
+
+    // If real coverage is very low, skip or generate minimal clouds
+    if (realCoverage < 0.02) {
+      console.log(`[VolumetricClouds] Clear sky at ${city.name} (coverage=${realCoverage.toFixed(3)}) — skipping`);
+      this.volumetricClouds = [];
+      return;
+    }
+
+    console.log(`[VolumetricClouds] ${city.name}: real coverage=${realCoverage.toFixed(3)} from ${dataSource}`);
+
     const seed = Math.round(city.lon * 7 + city.lat * 13) % 1000;
     const noiseW = 256, noiseH = 128;
     const cloudNoise = generateCloudNoise(noiseW, noiseH, seed);
@@ -243,7 +283,8 @@ export class DeckLayers {
 
         const dist = Math.sqrt(dx * dx + dy * dy) / regionRadius;
         const edgeFade = Math.max(0, 1 - dist * dist);
-        const cloudDensity = noiseVal * edgeFade;
+        // Modulate noise shape with real weather coverage
+        const cloudDensity = noiseVal * edgeFade * realCoverage;
         if (cloudDensity < 0.05) continue;
 
         const maxBand = Math.ceil((0.3 + hVal * 0.7) * bands.length);
