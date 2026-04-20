@@ -7,7 +7,7 @@
 
 import type { WeatherLevel, WeatherLayer, WeatherGrid, CloudLayers } from './types';
 import { fetchRealWeatherGrid } from './OpenMeteo';
-import { fetchNASAPowerCloudLayers } from './NASAPower';
+import { fetchNASAPowerOpticalDepth } from './NASAPower';
 
 const API_BASE = 'http://localhost:3001';
 
@@ -94,29 +94,8 @@ export class WeatherManager {
       if (gfsResult) return gfsResult;
     }
 
-    // Fallback: NASA POWER (free, no API key, has CLDLOW/CLDMID/CLDHIGH)
-    console.log('[Weather] Trying NASA POWER for cloud layers...');
-    try {
-      const nasaData = await fetchNASAPowerCloudLayers();
-      if (nasaData) {
-        this.cloudLayers = {
-          width: nasaData.width,
-          height: nasaData.height,
-          low: nasaData.low,
-          medium: nasaData.medium,
-          high: nasaData.high,
-          windU: nasaData.windU,
-          windV: nasaData.windV,
-          source: 'NASA POWER',
-        };
-        console.log(`[Weather] Cloud layers from NASA POWER (${nasaData.width}x${nasaData.height})`);
-        this.emit('cloudLayersLoaded', this.cloudLayers);
-        return this.cloudLayers;
-      }
-    } catch (e) {
-      console.warn('[Weather] NASA POWER failed:', e);
-    }
-
+    // Fallback: procedural generation (POWER only provides optical depth, not layers)
+    console.log('[Weather] GFS unavailable, using procedural cloud layers...');
     return null;
   }
 
