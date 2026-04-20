@@ -26,7 +26,7 @@ import {
   weatherToCloudTypes, getCloudTypeIndex,
   type CloudTypeConfig,
 } from './CloudTypes';
-import { generateCloudNoise, generateHeightNoise, generateStormNoise } from './CloudNoise';
+import { generateCloudNoise, generateHeightNoise, generateStormNoise } from '../weather/CloudNoise';
 
 // ── Band Config ────────────────────────────────────────────────────────
 
