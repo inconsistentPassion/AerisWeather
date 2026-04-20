@@ -91,17 +91,6 @@ export function setupWebSocket(server: any): WebSocketServer {
     }, 30000);
   }
 
-  function compressField(field: number[][], width: number, height: number): number[] {
-    // Downsample for streaming (send every 4th value)
-    const result: number[] = [];
-    for (let y = 0; y < height; y += 2) {
-      for (let x = 0; x < width; x += 2) {
-        result.push(field[y]?.[x] ?? 0);
-      }
-    }
-    return result;
-  }
-
   function compressFlatField(field: Float32Array, width: number, height: number): number[] {
     const result: number[] = [];
     for (let y = 0; y < height; y += 2) {
